@@ -5,6 +5,8 @@ trajectory_type: parametric
 
 control_rate_hz: 50.0
 takeoff_warmup_s: 1.5
+entry_acceptance_radius_m: 0.35
+entry_hold_s: 0.8
 land_at_end: true
 loop_route: false
 yaw_mode: face_velocity
@@ -12,8 +14,8 @@ yaw_mode: face_velocity
 curve:
   duration_s: 40.0
   constants:
-    cx: 1.0
-    cy: 2.0
+    cx: 0.0
+    cy: 0.0
     cz: -5.0
     ax: 1.8
     ay: 3.0

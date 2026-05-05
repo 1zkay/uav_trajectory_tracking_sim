@@ -18,6 +18,9 @@ ros2 topic echo /trajectory_tracker/current_stage --once
 ros2 topic echo /trajectory_path --once
 ```
 
+`/trajectory_tracker/current_stage` 的阶段编号为：`0=entry`、`1=trajectory`、`2=return`、`3=finished`。
+正常 8 字轨迹应先进入 `entry`，到达曲线起点并稳定后再进入 `trajectory`。
+
 主机云台相机和 YOLO 检测启动后：
 
 ```bash

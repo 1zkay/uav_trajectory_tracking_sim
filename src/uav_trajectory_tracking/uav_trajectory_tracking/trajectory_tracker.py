@@ -22,6 +22,12 @@ from std_msgs.msg import Int32
 from uav_trajectory_tracking.parametric_trajectory import ParametricTrajectory, Point3
 
 
+STAGE_ENTRY = 0
+STAGE_TRAJECTORY = 1
+STAGE_RETURN = 2
+STAGE_FINISHED = 3
+
+
 class TrajectoryTracker(Node):
     """Publish PX4 offboard setpoints sampled from a YAML parametric curve."""
 
@@ -44,11 +50,15 @@ class TrajectoryTracker(Node):
         self.trajectory = ParametricTrajectory.from_config(config)
         self.control_rate_hz = float(config.get("control_rate_hz", 10.0))
         self.takeoff_warmup_s = float(config.get("takeoff_warmup_s", 1.5))
+        self.entry_acceptance_radius_m = float(config.get("entry_acceptance_radius_m", 0.35))
+        self.entry_hold_s = float(config.get("entry_hold_s", 0.5))
         self.land_at_end = bool(config.get("land_at_end", True))
         self.loop_route = bool(config.get("loop_route", False))
         self.yaw_mode = str(config.get("yaw_mode", "face_velocity"))
+        self.entry_point = self.trajectory.sample(0.0)[0]
 
-        self.current_stage_index = 0
+        self.current_stage_index = STAGE_ENTRY
+        self.entry_reached_since_us: int | None = None
         self.trajectory_start_us: int | None = None
         self.returning = False
         self.return_reached_since_us: int | None = None
@@ -127,6 +137,8 @@ class TrajectoryTracker(Node):
             "Loaded parametric NED trajectory: "
             f"duration={self.trajectory.duration_s:.2f} s, "
             f"rate={self.control_rate_hz:.1f} Hz, "
+            f"entry=({self.entry_point[0]:.2f}, {self.entry_point[1]:.2f}, {self.entry_point[2]:.2f}) m, "
+            f"entry_radius={self.entry_acceptance_radius_m:.2f} m, "
             f"velocity_feedforward={self.trajectory.has_velocity}"
         )
         self.get_logger().info(
@@ -165,10 +177,10 @@ class TrajectoryTracker(Node):
     def _timer_callback(self) -> None:
         now_us = self._now_us()
 
-        self._publish_offboard_control_mode(now_us)
-
         if self._ready_to_track() and not self.land_command_sent:
             self._advance_trajectory_if_needed(now_us)
+
+        self._publish_offboard_control_mode(now_us)
 
         if not self.land_command_sent:
             self._publish_current_setpoint(now_us)
@@ -194,9 +206,7 @@ class TrajectoryTracker(Node):
 
     def _advance_trajectory_if_needed(self, now_us: int) -> None:
         if self.trajectory_start_us is None:
-            self.trajectory_start_us = now_us
-            self.current_stage_index = 0
-            self.get_logger().info("Started parametric trajectory.")
+            self._advance_entry_if_needed(now_us)
             return
 
         if self.finished:
@@ -215,11 +225,29 @@ class TrajectoryTracker(Node):
         if self.trajectory.return_point is not None:
             self.returning = True
             self.return_reached_since_us = None
-            self.current_stage_index = 1
+            self.current_stage_index = STAGE_RETURN
             self.get_logger().info("Parametric trajectory complete; flying to return point.")
             return
 
         self._finish_trajectory(now_us)
+
+    def _advance_entry_if_needed(self, now_us: int) -> None:
+        distance = self._distance_to_point(self.entry_point)
+        if distance > self.entry_acceptance_radius_m:
+            self.entry_reached_since_us = None
+            return
+
+        if self.entry_reached_since_us is None:
+            self.entry_reached_since_us = now_us
+            self.get_logger().info(f"Reached trajectory entry point (distance={distance:.2f} m).")
+            return
+
+        if now_us - self.entry_reached_since_us < int(self.entry_hold_s * 1_000_000):
+            return
+
+        self.trajectory_start_us = now_us
+        self.current_stage_index = STAGE_TRAJECTORY
+        self.get_logger().info("Started parametric trajectory from entry point.")
 
     def _advance_return_if_needed(self, now_us: int) -> None:
         assert self.trajectory.return_point is not None
@@ -237,7 +265,7 @@ class TrajectoryTracker(Node):
 
     def _finish_trajectory(self, now_us: int) -> None:
         self.finished = True
-        self.current_stage_index = 2
+        self.current_stage_index = STAGE_FINISHED
         if self.land_at_end:
             self.get_logger().info("Trajectory complete; sending land command.")
             self._land(now_us)
@@ -273,7 +301,12 @@ class TrajectoryTracker(Node):
     def _publish_offboard_control_mode(self, now_us: int) -> None:
         msg = OffboardControlMode()
         msg.position = True
-        msg.velocity = self.trajectory.has_velocity and not self.returning and not self.finished
+        msg.velocity = (
+            self.trajectory.has_velocity
+            and self.trajectory_start_us is not None
+            and not self.returning
+            and not self.finished
+        )
         msg.acceleration = False
         msg.attitude = False
         msg.body_rate = False
@@ -296,6 +329,11 @@ class TrajectoryTracker(Node):
         self.trajectory_pub.publish(msg)
 
     def _current_setpoint(self, now_us: int) -> tuple[Point3, Point3 | None, float]:
+        if self.trajectory_start_us is None:
+            _, _, configured_yaw = self.trajectory.sample(0.0)
+            yaw = configured_yaw if configured_yaw is not None else self._yaw_to_point(self.entry_point)
+            return self.entry_point, None, yaw
+
         if self.returning and self.trajectory.return_point is not None:
             target = self.trajectory.return_point
             return target, None, self._yaw_to_point(target)

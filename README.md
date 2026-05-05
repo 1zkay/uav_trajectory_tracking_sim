@@ -89,6 +89,10 @@ cd /home/zk/uav_trajectory_tracking_sim
 生成 Gazebo world，并同步到 PX4 的 worlds 目录；`scripts/start_trajectory_tracking.sh`
 也会默认把同一个主机 YAML 传给控制节点和 RViz 可视化节点。目标机启动脚本默认使用
 `target_trajectory.yaml`，当前轨迹是在主机悬停后云台视场内循环的小椭圆。
+轨迹控制采用 `entry -> trajectory -> return -> finished` 阶段：无人机先飞到曲线起点，
+满足 `entry_acceptance_radius_m` 并保持 `entry_hold_s` 后，才开始参数化时间 `t`，
+避免起飞追踪段破坏 8 字轨迹形状。
+默认 8 字轨迹的交叉点、起点和终点均为 `(0, 0, -5)`，因此 QGC 的水平轨迹不会包含额外的长距离进场线。
 
 使用自定义轨迹文件时，PX4/Gazebo 终端和 ROS 终端都传入同一个变量：
 
@@ -257,7 +261,7 @@ LOG_ROOT=/home/zk/uav_logs RUN_ID=wind_3ms_figure8 ./scripts/start_trajectory_tr
 - `/trajectory_markers`: 轨迹起点、终点和当前飞行位置。
 - `/trajectory_path`: YAML 参数化曲线采样得到的规划轨迹。
 - `/vehicle_path`: 飞行过程中累积的实际轨迹。
-- `/trajectory_tracker/current_stage`: 当前轨迹阶段。
+- `/trajectory_tracker/current_stage`: 当前轨迹阶段，`0=entry`、`1=trajectory`、`2=return`、`3=finished`。
 - `/x500_0/camera/image_raw`: 主机云台相机原始图像。
 - `/x500_0/camera/camera_info`: 主机云台相机内参。
 - `/x500_0/yolo/tracks`: YOLO + BoT-SORT 跟踪框，类型为 `vision_msgs/Detection2DArray`，其中 `Detection2D.id` 是跨帧 track id。
@@ -270,7 +274,7 @@ LOG_ROOT=/home/zk/uav_logs RUN_ID=wind_3ms_figure8 ./scripts/start_trajectory_tr
 - `/target/trajectory_markers`: 目标无人机轨迹可视化。
 - `/target/trajectory_path`: 目标无人机规划路径。
 - `/target/vehicle_path`: 目标无人机实际轨迹。
-- `/target/trajectory_tracker/current_stage`: 目标无人机当前轨迹阶段。
+- `/target/trajectory_tracker/current_stage`: 目标无人机当前轨迹阶段，编号含义同主机。
 
 ## 常见检查
 
