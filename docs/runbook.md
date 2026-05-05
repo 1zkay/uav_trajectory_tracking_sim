@@ -41,8 +41,8 @@ RViz 使用 `map` 作为固定坐标系。`trajectory_visualizer` 会把 PX4 本
 `x500_gimbal_self_filtered` 自机消隐模型。PX4 0 由 `scripts/start_px4_gazebo.sh` 以 `gz_x500_gimbal` airframe 启动；
 目标机 `x500_1` 继续使用普通 `gz_x500` / `PX4_SYS_AUTOSTART=4001`。
 
-Gazebo 静态标记不需要手工改 world。主机轨迹改
-`src/uav_trajectory_tracking/config/trajectory_hold.yaml`，目标机轨迹改
+Gazebo 静态标记不需要手工改 world。主机启动脚本默认轨迹改
+`src/uav_trajectory_tracking/config/trajectory_figure8.yaml`，目标机轨迹改
 `src/uav_trajectory_tracking/config/target_trajectory.yaml`，然后重启 PX4/Gazebo：
 
 ```bash

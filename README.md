@@ -77,14 +77,14 @@ cd /home/zk/uav_trajectory_tracking_sim
 `VehicleCommand.target_system` 设为 `2`。`scripts/start_target_trajectory_tracking.sh`
 已经按这个规则配置。`px4_instance > 0` 时不要复用主机的 `/fmu/in/*` 话题。
 
-主机默认轨迹在 `src/uav_trajectory_tracking/config/trajectory_hold.yaml`，目标机默认轨迹在
+主机启动脚本默认轨迹在 `src/uav_trajectory_tracking/config/trajectory_figure8.yaml`，目标机默认轨迹在
 `src/uav_trajectory_tracking/config/target_trajectory.yaml`。两者坐标系都是 PX4 本地 NED：
 
 - `x`: 北/前
 - `y`: 东/右
 - `z`: 下，起飞点上方 5 m 写作 `-5.0`
 
-只改主机轨迹时修改 `trajectory_hold.yaml`；只改目标机轨迹时修改 `target_trajectory.yaml`。
+只改主机默认轨迹时修改 `trajectory_figure8.yaml`；只改目标机轨迹时修改 `target_trajectory.yaml`。
 `scripts/start_px4_gazebo.sh` 会在启动前自动根据主机 YAML
 生成 Gazebo world，并同步到 PX4 的 worlds 目录；`scripts/start_trajectory_tracking.sh`
 也会默认把同一个主机 YAML 传给控制节点和 RViz 可视化节点。目标机启动脚本默认使用

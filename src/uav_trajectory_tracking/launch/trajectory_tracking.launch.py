@@ -237,7 +237,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "yolo_weights_path",
-                default_value="/home/zk/uav_trajectory_tracking_sim/yolov8s.pt",
+                default_value="yolov8s.pt",
                 description="YOLO weights used by yolo_tracker.",
             ),
             DeclareLaunchArgument(

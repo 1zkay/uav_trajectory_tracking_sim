@@ -4,6 +4,7 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PX4_ROOT="${PX4_ROOT:-/home/zk/PX4-Autopilot}"
+PYTHON_VENV="${PYTHON_VENV:-/home/zk/px4-venv}"
 PX4_GZ_WORLD="${PX4_GZ_WORLD:-trajectory_tracking}"
 PX4_INSTANCE="${PX4_INSTANCE:-1}"
 PX4_GZ_MODEL_NAME="${PX4_GZ_MODEL_NAME:-x500_1}"
@@ -16,7 +17,9 @@ else
 fi
 
 cd "${PX4_ROOT}"
-source /home/zk/px4-venv/bin/activate
+if [[ -f "${PYTHON_VENV}/bin/activate" ]]; then
+  source "${PYTHON_VENV}/bin/activate"
+fi
 
 export PX4_GZ_STANDALONE=1
 export PX4_GZ_WORLD

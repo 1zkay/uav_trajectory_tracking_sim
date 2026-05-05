@@ -4,6 +4,7 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PX4_ROOT="${PX4_ROOT:-/home/zk/PX4-Autopilot}"
+PYTHON_VENV="${PYTHON_VENV:-/home/zk/px4-venv}"
 PX4_GZ_WORLD="${PX4_GZ_WORLD:-trajectory_tracking}"
 TRAJECTORY_FILE="${TRAJECTORY_FILE:-${SIM_ROOT}/src/uav_trajectory_tracking/config/trajectory_figure8.yaml}"
 WIND_FILE="${WIND_FILE:-${SIM_ROOT}/src/uav_trajectory_tracking/config/wind.yaml}"
@@ -36,7 +37,9 @@ if [[ "${PX4_GZ_WORLD}" == "trajectory_tracking" ]]; then
 fi
 
 cd "${PX4_ROOT}"
-source /home/zk/px4-venv/bin/activate
+if [[ -f "${PYTHON_VENV}/bin/activate" ]]; then
+  source "${PYTHON_VENV}/bin/activate"
+fi
 
 export PX4_GZ_WORLD
 
