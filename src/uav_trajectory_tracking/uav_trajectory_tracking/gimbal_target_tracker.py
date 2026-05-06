@@ -784,7 +784,10 @@ class GimbalTargetTracker(Node):
         ):
             self.target_missing_since_s = self.last_detection_time_s
             return
-        if self.last_detections_msg_time_s is not None:
+        if (
+            self.send_command_before_first_detection
+            and self.last_detections_msg_time_s is not None
+        ):
             self.target_missing_since_s = self.last_detections_msg_time_s
 
     def _should_search_for_target(self, now_s: float) -> bool:
