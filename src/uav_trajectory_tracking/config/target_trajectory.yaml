@@ -19,14 +19,13 @@ curve:
     ax: 1.3
     ay: 7.0
     az: 1.2
-    period: 48.0
   position:
-    x: cx + ax * cos(tau * t / period)
-    y: cy + ay * sin(tau * t / period)
-    z: cz - az * sin(2.0 * tau * t / period)
+    x: cx + ax * cos(tau * u)
+    y: cy + ay * sin(tau * u)
+    z: cz - az * sin(2.0 * tau * u)
   velocity:
-    x: -ax * tau / period * sin(tau * t / period)
-    y: ay * tau / period * cos(tau * t / period)
-    z: -az * 2.0 * tau / period * cos(2.0 * tau * t / period)
+    x: -ax * tau / duration_s * sin(tau * u)
+    y: ay * tau / duration_s * cos(tau * u)
+    z: -az * 2.0 * tau / duration_s * cos(2.0 * tau * u)
 
 visualization_samples: 180

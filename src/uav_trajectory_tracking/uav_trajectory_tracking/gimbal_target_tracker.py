@@ -68,11 +68,6 @@ class TrackingState(str, Enum):
 class GimbalTargetTracker(Node):
     """Keep a detected target near the gimbal camera image center."""
 
-    MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW = 1000
-    MAV_CMD_DO_GIMBAL_MANAGER_CONFIGURE = 1001
-    GIMBAL_MANAGER_FLAGS_YAW_LOCK = 16
-    GIMBAL_DEVICE_FLAGS_YAW_IN_VEHICLE_FRAME = 32
-    GIMBAL_DEVICE_FLAGS_YAW_IN_EARTH_FRAME = 64
     COMMAND_INTERFACE_GIMBAL_MANAGER_SET_ATTITUDE = "gimbal_manager_set_attitude"
     COMMAND_INTERFACE_VEHICLE_COMMAND = "vehicle_command"
 
@@ -608,7 +603,7 @@ class GimbalTargetTracker(Node):
         if self.yaw_frame == "vehicle":
             return 0
         if self.yaw_frame == "earth":
-            return self.GIMBAL_MANAGER_FLAGS_YAW_LOCK
+            return GimbalManagerSetAttitude.GIMBAL_MANAGER_FLAGS_YAW_LOCK
         raise ValueError(
             "yaw_frame must be 'vehicle' or 'earth'; "
             f"got {self.yaw_frame!r}"
@@ -627,10 +622,10 @@ class GimbalTargetTracker(Node):
 
     def _feedback_yaw_frame(self, device_flags: int) -> str:
         has_vehicle_frame = bool(
-            device_flags & self.GIMBAL_DEVICE_FLAGS_YAW_IN_VEHICLE_FRAME
+            device_flags & GimbalDeviceAttitudeStatus.DEVICE_FLAGS_YAW_IN_VEHICLE_FRAME
         )
         has_earth_frame = bool(
-            device_flags & self.GIMBAL_DEVICE_FLAGS_YAW_IN_EARTH_FRAME
+            device_flags & GimbalDeviceAttitudeStatus.DEVICE_FLAGS_YAW_IN_EARTH_FRAME
         )
         if has_vehicle_frame and not has_earth_frame:
             return "vehicle"
@@ -640,7 +635,7 @@ class GimbalTargetTracker(Node):
         # Backward-compatible MAVLink interpretation when neither explicit
         # yaw-frame flag is present.
         if not has_vehicle_frame and not has_earth_frame:
-            if device_flags & self.GIMBAL_MANAGER_FLAGS_YAW_LOCK:
+            if device_flags & GimbalDeviceAttitudeStatus.DEVICE_FLAGS_YAW_LOCK:
                 return "earth"
             return "vehicle"
 
@@ -1426,22 +1421,10 @@ class GimbalTargetTracker(Node):
         self.has_sent_gimbal_command = True
 
     def _gimbal_configure_command_id(self) -> int:
-        return int(
-            getattr(
-                VehicleCommand,
-                "VEHICLE_CMD_DO_GIMBAL_MANAGER_CONFIGURE",
-                self.MAV_CMD_DO_GIMBAL_MANAGER_CONFIGURE,
-            )
-        )
+        return int(VehicleCommand.VEHICLE_CMD_DO_GIMBAL_MANAGER_CONFIGURE)
 
     def _gimbal_pitchyaw_command_id(self) -> int:
-        return int(
-            getattr(
-                VehicleCommand,
-                "VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW",
-                self.MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW,
-            )
-        )
+        return int(VehicleCommand.VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW)
 
     def _now_s(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9

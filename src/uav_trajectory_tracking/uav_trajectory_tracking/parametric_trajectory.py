@@ -100,7 +100,7 @@ class ParametricTrajectory:
 
         duration_s = positive_float(raw_curve.get("duration_s", config.get("duration_s")), "curve.duration_s")
         constants = parse_constants(raw_curve.get("constants", {}))
-        allowed_variables = set(constants) | {"t", "u"}
+        allowed_variables = set(constants) | {"t", "u", "duration_s"}
 
         raw_position = raw_curve.get("position")
         if not isinstance(raw_position, dict):
@@ -174,6 +174,7 @@ class ParametricTrajectory:
         variables = dict(self.constants)
         variables["t"] = t_s
         variables["u"] = t_s / self.duration_s
+        variables["duration_s"] = self.duration_s
         return variables
 
 
@@ -187,7 +188,7 @@ def parse_constants(raw_constants: Any) -> dict[str, float]:
         name = str(key)
         if not name.isidentifier():
             raise ValueError(f"Invalid curve constant name '{name}'.")
-        if name in {"t", "u"} or name in _MATH_NAMES:
+        if name in {"t", "u", "duration_s"} or name in _MATH_NAMES:
             raise ValueError(f"curve.constants cannot redefine reserved name '{name}'.")
         constants[name] = float(value)
     return constants
