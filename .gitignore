@@ -15,6 +15,7 @@ __pycache__/
 
 # Editor and local runtime files
 .vscode/
+.claude
 .idea/
 *.log
 *.bag
