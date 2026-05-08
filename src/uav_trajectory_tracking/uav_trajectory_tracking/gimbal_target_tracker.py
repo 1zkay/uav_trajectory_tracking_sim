@@ -95,8 +95,8 @@ class GimbalTargetTracker(Node):
         )
         self.declare_parameter("error_topic", "/x500_0/gimbal_target_tracker/error")
         self.declare_parameter(
-            "error_rate_topic",
-            "/x500_0/gimbal_target_tracker/error_rate",
+            "residual_error_rate_topic",
+            "/x500_0/gimbal_target_tracker/residual_error_rate",
         )
         self.declare_parameter(
             "tracking_active_topic",
@@ -126,7 +126,7 @@ class GimbalTargetTracker(Node):
         self.declare_parameter("large_target_area_ratio_start", 0.08)
         self.declare_parameter("large_target_area_ratio_full", 0.28)
         self.declare_parameter("large_target_min_control_scale", 0.25)
-        self.declare_parameter("error_rate_filter_alpha", 0.35)
+        self.declare_parameter("residual_error_rate_filter_alpha", 0.35)
 
         self.declare_parameter("yaw_kp_s_inv", 0.18)
         self.declare_parameter("pitch_kp_s_inv", 0.14)
@@ -186,7 +186,7 @@ class GimbalTargetTracker(Node):
         self.declare_parameter("max_search_cmd_actual_error_deg", 30.0)
         self.declare_parameter("lock_yaw_error_deg", 10.0)
         self.declare_parameter("lock_pitch_error_deg", 10.0)
-        self.declare_parameter("lock_error_rate_deg_s", 45.0)
+        self.declare_parameter("lock_residual_error_rate_deg_s", 45.0)
         self.declare_parameter("lock_confirm_s", 0.5)
         self.declare_parameter("lock_loss_grace_s", 0.2)
         self.declare_parameter("initialize_command_from_feedback", True)
@@ -209,7 +209,9 @@ class GimbalTargetTracker(Node):
             self.get_parameter("gimbal_set_attitude_topic").value
         )
         self.error_topic = str(self.get_parameter("error_topic").value)
-        self.error_rate_topic = str(self.get_parameter("error_rate_topic").value)
+        self.residual_error_rate_topic = str(
+            self.get_parameter("residual_error_rate_topic").value
+        )
         self.tracking_active_topic = str(
             self.get_parameter("tracking_active_topic").value
         )
@@ -257,8 +259,8 @@ class GimbalTargetTracker(Node):
             0.0,
             1.0,
         )
-        self.error_rate_filter_alpha = clamp(
-            float(self.get_parameter("error_rate_filter_alpha").value),
+        self.residual_error_rate_filter_alpha = clamp(
+            float(self.get_parameter("residual_error_rate_filter_alpha").value),
             0.0,
             1.0,
         )
@@ -383,9 +385,9 @@ class GimbalTargetTracker(Node):
             0.0,
             float(self.get_parameter("lock_pitch_error_deg").value),
         )
-        self.lock_error_rate_deg_s = max(
+        self.lock_residual_error_rate_deg_s = max(
             0.0,
-            float(self.get_parameter("lock_error_rate_deg_s").value),
+            float(self.get_parameter("lock_residual_error_rate_deg_s").value),
         )
         self.lock_confirm_s = max(
             0.0,
@@ -432,13 +434,13 @@ class GimbalTargetTracker(Node):
         self.last_image_error_time_s: float | None = None
         self.last_image_yaw_error_deg: float | None = None
         self.last_image_pitch_error_deg: float | None = None
-        self.yaw_error_rate_deg_s = 0.0
-        self.pitch_error_rate_deg_s = 0.0
+        self.residual_yaw_error_rate_deg_s = 0.0
+        self.residual_pitch_error_rate_deg_s = 0.0
         self.lock_candidate_since_s: float | None = None
         self.last_lock_true_time_s: float | None = None
         self.target_lock_active = False
         self.lock_centered = False
-        self.lock_rate_ok = False
+        self.lock_residual_rate_ok = False
         self.lock_quality = 0.0
         self.has_sent_gimbal_command = False
         self.command_initialized_from_feedback = False
@@ -470,9 +472,9 @@ class GimbalTargetTracker(Node):
             px4_qos,
         )
         self.error_pub = self.create_publisher(Vector3Stamped, self.error_topic, 10)
-        self.error_rate_pub = self.create_publisher(
+        self.residual_error_rate_pub = self.create_publisher(
             Vector3Stamped,
-            self.error_rate_topic,
+            self.residual_error_rate_topic,
             10,
         )
         self.tracking_active_pub = self.create_publisher(
@@ -529,7 +531,7 @@ class GimbalTargetTracker(Node):
             f"set_attitude={self.gimbal_set_attitude_topic}, class={target_filter}, "
             f"track={track_filter}, "
             f"lock_active={self.lock_active_topic}, "
-            f"error_rate={self.error_rate_topic}, "
+            f"residual_error_rate={self.residual_error_rate_topic}, "
             f"state={self.state_topic}, rate={self.control_rate_hz:.1f} Hz"
         )
 
@@ -819,7 +821,7 @@ class GimbalTargetTracker(Node):
         raw_yaw_error_deg, raw_pitch_error_deg = self._camera_angle_error_deg(
             self.last_detection
         )
-        self._update_error_rate(
+        self._update_residual_error_rate(
             now_s,
             raw_yaw_error_deg,
             raw_pitch_error_deg,
@@ -858,7 +860,7 @@ class GimbalTargetTracker(Node):
                 pitch_error_deg,
                 self.last_detection.score,
             )
-            self._publish_error_rate(now_us, self.lock_quality)
+            self._publish_residual_error_rate(now_us, self.lock_quality)
             self._publish_lock_active(target_locked)
             self._publish_gimbal_setpoint(
                 now_us,
@@ -896,7 +898,7 @@ class GimbalTargetTracker(Node):
             pitch_error_deg,
             self.last_detection.score,
         )
-        self._publish_error_rate(now_us, self.lock_quality)
+        self._publish_residual_error_rate(now_us, self.lock_quality)
         self._publish_lock_active(target_locked)
         self._publish_gimbal_setpoint(
             now_us,
@@ -911,7 +913,7 @@ class GimbalTargetTracker(Node):
         self._reset_error_integrals()
         self._reset_tracking_gimbal_lag()
         self._publish_lock_active(False)
-        self._publish_error_rate(now_us, 0.0)
+        self._publish_residual_error_rate(now_us, 0.0)
         self._mark_target_missing_if_needed(now_s)
 
         if not self._has_recent_detections_stream(now_s):
@@ -1357,7 +1359,7 @@ class GimbalTargetTracker(Node):
     def _apply_angle_deadband(self, value: float) -> float:
         return 0.0 if abs(value) < self.deadband_angle_deg else value
 
-    def _update_error_rate(
+    def _update_residual_error_rate(
         self,
         now_s: float,
         yaw_error_deg: float,
@@ -1371,8 +1373,8 @@ class GimbalTargetTracker(Node):
             self.last_image_error_time_s = now_s
             self.last_image_yaw_error_deg = yaw_error_deg
             self.last_image_pitch_error_deg = pitch_error_deg
-            self.yaw_error_rate_deg_s = 0.0
-            self.pitch_error_rate_deg_s = 0.0
+            self.residual_yaw_error_rate_deg_s = 0.0
+            self.residual_pitch_error_rate_deg_s = 0.0
             return
 
         dt_s = now_s - self.last_image_error_time_s
@@ -1380,8 +1382,8 @@ class GimbalTargetTracker(Node):
             self.last_image_error_time_s = now_s
             self.last_image_yaw_error_deg = yaw_error_deg
             self.last_image_pitch_error_deg = pitch_error_deg
-            self.yaw_error_rate_deg_s = 0.0
-            self.pitch_error_rate_deg_s = 0.0
+            self.residual_yaw_error_rate_deg_s = 0.0
+            self.residual_pitch_error_rate_deg_s = 0.0
             return
 
         raw_yaw_rate_deg_s = angle_delta_deg(
@@ -1391,14 +1393,14 @@ class GimbalTargetTracker(Node):
         raw_pitch_rate_deg_s = (
             pitch_error_deg - self.last_image_pitch_error_deg
         ) / dt_s
-        alpha = self.error_rate_filter_alpha
-        self.yaw_error_rate_deg_s = lerp(
-            self.yaw_error_rate_deg_s,
+        alpha = self.residual_error_rate_filter_alpha
+        self.residual_yaw_error_rate_deg_s = lerp(
+            self.residual_yaw_error_rate_deg_s,
             raw_yaw_rate_deg_s,
             alpha,
         )
-        self.pitch_error_rate_deg_s = lerp(
-            self.pitch_error_rate_deg_s,
+        self.residual_pitch_error_rate_deg_s = lerp(
+            self.residual_pitch_error_rate_deg_s,
             raw_pitch_rate_deg_s,
             alpha,
         )
@@ -1423,23 +1425,23 @@ class GimbalTargetTracker(Node):
         )
         self.lock_centered = yaw_ok and pitch_ok
 
-        max_error_rate_deg_s = max(
-            abs(self.yaw_error_rate_deg_s),
-            abs(self.pitch_error_rate_deg_s),
+        max_residual_error_rate_deg_s = max(
+            abs(self.residual_yaw_error_rate_deg_s),
+            abs(self.residual_pitch_error_rate_deg_s),
         )
-        self.lock_rate_ok = (
-            self.lock_error_rate_deg_s <= 0.0
-            or max_error_rate_deg_s <= self.lock_error_rate_deg_s
+        self.lock_residual_rate_ok = (
+            self.lock_residual_error_rate_deg_s <= 0.0
+            or max_residual_error_rate_deg_s <= self.lock_residual_error_rate_deg_s
         )
         lock_candidate = (
             self.lock_centered
-            and self.lock_rate_ok
+            and self.lock_residual_rate_ok
             and not tracking_gimbal_lag
         )
         self.lock_quality = self._lock_quality(
             yaw_error_deg,
             pitch_error_deg,
-            max_error_rate_deg_s,
+            max_residual_error_rate_deg_s,
         )
 
         if not lock_candidate:
@@ -1469,7 +1471,7 @@ class GimbalTargetTracker(Node):
         self,
         yaw_error_deg: float,
         pitch_error_deg: float,
-        max_error_rate_deg_s: float,
+        max_residual_error_rate_deg_s: float,
     ) -> float:
         yaw_quality = threshold_quality(abs(yaw_error_deg), self.lock_yaw_error_deg)
         pitch_quality = threshold_quality(
@@ -1477,8 +1479,8 @@ class GimbalTargetTracker(Node):
             self.lock_pitch_error_deg,
         )
         rate_quality = threshold_quality(
-            max_error_rate_deg_s,
-            self.lock_error_rate_deg_s,
+            max_residual_error_rate_deg_s,
+            self.lock_residual_error_rate_deg_s,
         )
         return min(yaw_quality, pitch_quality, rate_quality)
 
@@ -1486,13 +1488,13 @@ class GimbalTargetTracker(Node):
         self.last_image_error_time_s = None
         self.last_image_yaw_error_deg = None
         self.last_image_pitch_error_deg = None
-        self.yaw_error_rate_deg_s = 0.0
-        self.pitch_error_rate_deg_s = 0.0
+        self.residual_yaw_error_rate_deg_s = 0.0
+        self.residual_pitch_error_rate_deg_s = 0.0
         self.lock_candidate_since_s = None
         self.last_lock_true_time_s = None
         self.target_lock_active = False
         self.lock_centered = False
-        self.lock_rate_ok = False
+        self.lock_residual_rate_ok = False
         self.lock_quality = 0.0
 
     def _publish_error(
@@ -1511,15 +1513,15 @@ class GimbalTargetTracker(Node):
         msg.vector.z = float(score)
         self.error_pub.publish(msg)
 
-    def _publish_error_rate(self, now_us: int, quality: float) -> None:
+    def _publish_residual_error_rate(self, now_us: int, quality: float) -> None:
         msg = Vector3Stamped()
         msg.header.stamp.sec = int(now_us // 1_000_000)
         msg.header.stamp.nanosec = int((now_us % 1_000_000) * 1000)
         msg.header.frame_id = "camera_link"
-        msg.vector.x = float(self.yaw_error_rate_deg_s)
-        msg.vector.y = float(self.pitch_error_rate_deg_s)
+        msg.vector.x = float(self.residual_yaw_error_rate_deg_s)
+        msg.vector.y = float(self.residual_pitch_error_rate_deg_s)
         msg.vector.z = float(quality)
-        self.error_rate_pub.publish(msg)
+        self.residual_error_rate_pub.publish(msg)
 
     def _publish_tracking_active(self, active: bool) -> None:
         msg = Bool()
@@ -1606,7 +1608,10 @@ class GimbalTargetTracker(Node):
             self._diagnostic_value("tracking_active", active),
             self._diagnostic_value("lock_active", self.target_lock_active),
             self._diagnostic_value("lock_centered", self.lock_centered),
-            self._diagnostic_value("lock_rate_ok", self.lock_rate_ok),
+            self._diagnostic_value(
+                "lock_residual_rate_ok",
+                self.lock_residual_rate_ok,
+            ),
             self._diagnostic_value("lock_quality", self.lock_quality),
             self._diagnostic_value(
                 "lock_candidate_duration_s",
@@ -1622,12 +1627,12 @@ class GimbalTargetTracker(Node):
                 self.last_image_pitch_error_deg,
             ),
             self._diagnostic_value(
-                "yaw_error_rate_deg_s",
-                self.yaw_error_rate_deg_s,
+                "residual_yaw_error_rate_deg_s",
+                self.residual_yaw_error_rate_deg_s,
             ),
             self._diagnostic_value(
-                "pitch_error_rate_deg_s",
-                self.pitch_error_rate_deg_s,
+                "residual_pitch_error_rate_deg_s",
+                self.residual_pitch_error_rate_deg_s,
             ),
             self._diagnostic_value("stabilization_mode", self.stabilization_mode),
             self._diagnostic_value(

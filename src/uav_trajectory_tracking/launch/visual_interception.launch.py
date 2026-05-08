@@ -50,6 +50,7 @@ def generate_launch_description():
     gimbal_joint_state_topic = LaunchConfiguration("gimbal_joint_state_topic")
     gimbal_set_attitude_topic = LaunchConfiguration("gimbal_set_attitude_topic")
     gimbal_tracking_active_topic = LaunchConfiguration("gimbal_tracking_active_topic")
+    gimbal_lock_active_topic = LaunchConfiguration("gimbal_lock_active_topic")
     enable_gimbal_performance_monitor = LaunchConfiguration(
         "enable_gimbal_performance_monitor"
     )
@@ -239,6 +240,11 @@ def generate_launch_description():
                 description="Gimbal target tracker active-state topic.",
             ),
             DeclareLaunchArgument(
+                "gimbal_lock_active_topic",
+                default_value="/x500_0/gimbal_target_tracker/lock_active",
+                description="Gimbal target tracker seeker-lock topic.",
+            ),
+            DeclareLaunchArgument(
                 "enable_gimbal_performance_monitor",
                 default_value="true",
                 description="Start gimbal visual-servo performance monitor.",
@@ -356,6 +362,8 @@ def generate_launch_description():
                         "camera_info_topic": camera_info_topic,
                         "gimbal_joint_state_topic": gimbal_joint_state_topic,
                         "gimbal_set_attitude_topic": gimbal_set_attitude_topic,
+                        "tracking_active_topic": gimbal_tracking_active_topic,
+                        "lock_active_topic": gimbal_lock_active_topic,
                         "vehicle_command_topic": vehicle_command_topic,
                         "vehicle_command_ack_topic": vehicle_command_ack_topic,
                         "target_system": ParameterValue(target_system, value_type=int),
@@ -379,6 +387,7 @@ def generate_launch_description():
                         "vehicle_attitude_topic": vehicle_attitude_topic,
                         "gimbal_joint_state_topic": gimbal_joint_state_topic,
                         "tracking_active_topic": gimbal_tracking_active_topic,
+                        "lock_active_topic": gimbal_lock_active_topic,
                         "offboard_control_mode_topic": offboard_control_mode_topic,
                         "trajectory_setpoint_topic": trajectory_setpoint_topic,
                         "vehicle_command_topic": vehicle_command_topic,
