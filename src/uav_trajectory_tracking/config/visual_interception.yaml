@@ -7,11 +7,14 @@ takeoff_warmup_s: 1.5
 initial_hover_position_ned: [1.0, 2.0, -5.0]
 hover_acceptance_radius_m: 0.1
 
-pursuit_speed_mps: 2.0
-max_vertical_speed_mps: 1.0
+pursuit_speed_mps: 1.2
+max_vertical_speed_mps: 0.5
+max_pursuit_accel_mps2: 0.5
 
-tracking_active_timeout_s: 0.5
-gimbal_feedback_timeout_s: 0.5
+tracking_confirm_s: 1.0
+tracking_loss_grace_s: 1.0
+tracking_active_timeout_s: 0.8
+gimbal_feedback_timeout_s: 0.8
 hold_position_on_loss: true
 yaw_mode: face_los
 

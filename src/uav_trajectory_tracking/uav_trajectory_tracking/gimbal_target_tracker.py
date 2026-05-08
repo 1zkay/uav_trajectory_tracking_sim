@@ -68,6 +68,9 @@ class GimbalTargetTracker(Node):
 
     COMMAND_INTERFACE_GIMBAL_MANAGER_SET_ATTITUDE = "gimbal_manager_set_attitude"
     COMMAND_INTERFACE_VEHICLE_COMMAND = "vehicle_command"
+    STABILIZATION_MODE_BODY_FOLLOW = "body_follow"
+    STABILIZATION_MODE_ROLL_PITCH_LOCK = "roll_pitch_lock"
+    STABILIZATION_MODE_EARTH_LOCK = "earth_lock"
 
     def __init__(self) -> None:
         super().__init__("gimbal_target_tracker")
@@ -136,6 +139,10 @@ class GimbalTargetTracker(Node):
         self.declare_parameter("gimbal_device_id", 0.0)
         self.declare_parameter("gimbal_yaw_joint_name", "cgo3_vertical_arm_joint")
         self.declare_parameter("gimbal_pitch_joint_name", "cgo3_camera_joint")
+        self.declare_parameter(
+            "stabilization_mode",
+            self.STABILIZATION_MODE_EARTH_LOCK,
+        )
         self.declare_parameter(
             "command_interface",
             self.COMMAND_INTERFACE_GIMBAL_MANAGER_SET_ATTITUDE,
@@ -260,6 +267,11 @@ class GimbalTargetTracker(Node):
         self.gimbal_pitch_joint_name = str(
             self.get_parameter("gimbal_pitch_joint_name").value
         )
+        self.stabilization_mode = (
+            str(self.get_parameter("stabilization_mode").value).strip().lower()
+        )
+        self._validate_stabilization_mode()
+        self.gimbal_manager_flags = self._gimbal_manager_flags()
         self.command_interface = (
             str(self.get_parameter("command_interface").value).strip().lower()
         )
@@ -423,6 +435,8 @@ class GimbalTargetTracker(Node):
             f"detections={self.detections_topic}, "
             f"camera_info={self.camera_info_topic}, "
             f"joint_state={self.gimbal_joint_state_topic}, "
+            f"stabilization={self.stabilization_mode}, "
+            f"flags={self.gimbal_manager_flags}, "
             f"command_interface={self.command_interface}, "
             f"command={self.vehicle_command_topic}, ack={self.vehicle_command_ack_topic}, "
             f"set_attitude={self.gimbal_set_attitude_topic}, class={target_filter}, "
@@ -497,6 +511,8 @@ class GimbalTargetTracker(Node):
         self.warned_missing_joint_feedback = False
 
     def _initialize_command_from_feedback_if_needed(self) -> None:
+        if self.stabilization_mode != self.STABILIZATION_MODE_BODY_FOLLOW:
+            return
         if not self.initialize_command_from_feedback:
             return
         if self.command_initialized_from_feedback or self.has_sent_gimbal_command:
@@ -614,6 +630,29 @@ class GimbalTargetTracker(Node):
                 "command_interface must be one of "
                 f"{sorted(valid_interfaces)}; got {self.command_interface!r}"
             )
+
+    def _validate_stabilization_mode(self) -> None:
+        valid_modes = {
+            self.STABILIZATION_MODE_BODY_FOLLOW,
+            self.STABILIZATION_MODE_ROLL_PITCH_LOCK,
+            self.STABILIZATION_MODE_EARTH_LOCK,
+        }
+        if self.stabilization_mode not in valid_modes:
+            raise ValueError(
+                "stabilization_mode must be one of "
+                f"{sorted(valid_modes)}; got {self.stabilization_mode!r}"
+            )
+
+    def _gimbal_manager_flags(self) -> int:
+        roll_lock = int(GimbalManagerSetAttitude.GIMBAL_MANAGER_FLAGS_ROLL_LOCK)
+        pitch_lock = int(GimbalManagerSetAttitude.GIMBAL_MANAGER_FLAGS_PITCH_LOCK)
+        yaw_lock = int(GimbalManagerSetAttitude.GIMBAL_MANAGER_FLAGS_YAW_LOCK)
+
+        if self.stabilization_mode == self.STABILIZATION_MODE_BODY_FOLLOW:
+            return 0
+        if self.stabilization_mode == self.STABILIZATION_MODE_ROLL_PITCH_LOCK:
+            return roll_lock | pitch_lock
+        return roll_lock | pitch_lock | yaw_lock
 
     @staticmethod
     def _best_hypothesis(detection: Detection2D) -> tuple[str, float]:
@@ -865,11 +904,15 @@ class GimbalTargetTracker(Node):
         self._set_search_pitch_target()
 
     def _search_anchor_yaw_deg(self, now_s: float) -> float:
+        if self.stabilization_mode != self.STABILIZATION_MODE_BODY_FOLLOW:
+            return self.cmd_yaw_deg
         if self._has_fresh_joint_feedback(now_s) and self.actual_yaw_deg is not None:
             return self.actual_yaw_deg
         return self.cmd_yaw_deg
 
     def _search_anchor_pitch_deg(self, now_s: float) -> float:
+        if self.stabilization_mode != self.STABILIZATION_MODE_BODY_FOLLOW:
+            return self.cmd_pitch_deg
         if (
             self._has_fresh_joint_feedback(now_s)
             and self.actual_pitch_deg is not None
@@ -934,6 +977,9 @@ class GimbalTargetTracker(Node):
         return self.local_search_pitch_bands_deg
 
     def _tracking_gimbal_lag_too_large(self, now_s: float) -> bool:
+        if self.stabilization_mode != self.STABILIZATION_MODE_BODY_FOLLOW:
+            self._reset_tracking_gimbal_lag()
+            return False
         if self.max_tracking_cmd_actual_error_deg <= 0.0:
             self._reset_tracking_gimbal_lag()
             return False
@@ -963,6 +1009,8 @@ class GimbalTargetTracker(Node):
         self.tracking_cmd_actual_error_since_s = None
 
     def _search_gimbal_lag_too_large(self, now_s: float) -> bool:
+        if self.stabilization_mode != self.STABILIZATION_MODE_BODY_FOLLOW:
+            return False
         if self.max_search_cmd_actual_error_deg <= 0.0:
             return False
         if not self._has_fresh_joint_feedback(now_s):
@@ -982,6 +1030,8 @@ class GimbalTargetTracker(Node):
     def _cmd_actual_error_deg(
         self,
     ) -> tuple[float | None, float | None]:
+        if self.stabilization_mode != self.STABILIZATION_MODE_BODY_FOLLOW:
+            return None, None
         yaw_error_deg = (
             None
             if self.actual_yaw_deg is None
@@ -1204,6 +1254,11 @@ class GimbalTargetTracker(Node):
         status.values = [
             self._diagnostic_value("state", self.tracking_state.value),
             self._diagnostic_value("tracking_active", active),
+            self._diagnostic_value("stabilization_mode", self.stabilization_mode),
+            self._diagnostic_value(
+                "gimbal_manager_flags",
+                float(self.gimbal_manager_flags),
+            ),
             self._diagnostic_value("cmd_yaw_deg", self.cmd_yaw_deg),
             self._diagnostic_value("cmd_pitch_deg", self.cmd_pitch_deg),
             self._diagnostic_value("actual_yaw_deg", self.actual_yaw_deg),
@@ -1360,7 +1415,7 @@ class GimbalTargetTracker(Node):
         msg.origin_compid = self.source_component
         msg.target_system = self.target_system
         msg.target_component = self.target_component
-        msg.flags = 0
+        msg.flags = self.gimbal_manager_flags
         msg.gimbal_device_id = int(self.gimbal_device_id)
         msg.q = euler_to_quaternion(
             0.0,
@@ -1386,7 +1441,7 @@ class GimbalTargetTracker(Node):
         msg.param2 = float(yaw_deg)
         msg.param3 = math.nan
         msg.param4 = math.nan
-        msg.param5 = 0.0
+        msg.param5 = float(self.gimbal_manager_flags)
         msg.param6 = 0.0
         msg.param7 = self.gimbal_device_id
         msg.target_system = self.target_system

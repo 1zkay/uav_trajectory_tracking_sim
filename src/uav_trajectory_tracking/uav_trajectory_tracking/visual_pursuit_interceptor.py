@@ -28,6 +28,7 @@ class InterceptorState:
     INITIALIZING = "initializing"
     TAKEOFF = "takeoff"
     HOLD = "hold"
+    ACQUIRING = "acquiring_target"
     PURSUIT = "pursuit"
     TARGET_LOST = "target_lost"
 
@@ -54,8 +55,14 @@ class VisualPursuitInterceptor(Node):
         self.declare_parameter("source_component", 1)
 
         config = self._load_config()
-        self.control_rate_hz = positive_float(config.get("control_rate_hz", 20.0), "control_rate_hz")
-        self.takeoff_warmup_s = nonnegative_float(config.get("takeoff_warmup_s", 1.5), "takeoff_warmup_s")
+        self.control_rate_hz = positive_float(
+            config.get("control_rate_hz", 20.0),
+            "control_rate_hz",
+        )
+        self.takeoff_warmup_s = nonnegative_float(
+            config.get("takeoff_warmup_s", 1.5),
+            "takeoff_warmup_s",
+        )
         self.initial_hover_position = parse_point(
             config.get("initial_hover_position_ned", [1.0, 2.0, -5.0]),
             "initial_hover_position_ned",
@@ -64,10 +71,25 @@ class VisualPursuitInterceptor(Node):
             config.get("hover_acceptance_radius_m", 0.3),
             "hover_acceptance_radius_m",
         )
-        self.pursuit_speed_mps = positive_float(config.get("pursuit_speed_mps", 2.0), "pursuit_speed_mps")
+        self.pursuit_speed_mps = positive_float(
+            config.get("pursuit_speed_mps", 2.0),
+            "pursuit_speed_mps",
+        )
         self.max_vertical_speed_mps = positive_float(
             config.get("max_vertical_speed_mps", 1.0),
             "max_vertical_speed_mps",
+        )
+        self.max_pursuit_accel_mps2 = positive_float(
+            config.get("max_pursuit_accel_mps2", 1.0),
+            "max_pursuit_accel_mps2",
+        )
+        self.tracking_confirm_s = nonnegative_float(
+            config.get("tracking_confirm_s", 1.0),
+            "tracking_confirm_s",
+        )
+        self.tracking_loss_grace_s = nonnegative_float(
+            config.get("tracking_loss_grace_s", 0.4),
+            "tracking_loss_grace_s",
         )
         self.tracking_active_timeout_s = positive_float(
             config.get("tracking_active_timeout_s", 0.5),
@@ -99,10 +121,14 @@ class VisualPursuitInterceptor(Node):
         self.vehicle_attitude: VehicleAttitude | None = None
         self.tracking_active = False
         self.last_tracking_active_time_s: float | None = None
+        self.tracking_true_since_s: float | None = None
+        self.last_tracking_true_time_s: float | None = None
         self.gimbal_yaw_rad: float | None = None
         self.gimbal_pitch_rad: float | None = None
         self.last_gimbal_feedback_time_s: float | None = None
-        self.hold_position: tuple[float, float, float] | None = self.initial_hover_position
+        self.hold_position: tuple[float, float, float] | None = (
+            self.initial_hover_position
+        )
         self.initial_hover_reached = False
         self.state = InterceptorState.INITIALIZING
         self.previous_state = InterceptorState.INITIALIZING
@@ -112,6 +138,7 @@ class VisualPursuitInterceptor(Node):
         self.last_los_body = (1.0, 0.0, 0.0)
         self.last_los_ned = (1.0, 0.0, 0.0)
         self.last_velocity_ned = (0.0, 0.0, 0.0)
+        self.last_control_time_s: float | None = None
 
         px4_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -222,8 +249,15 @@ class VisualPursuitInterceptor(Node):
         self.vehicle_attitude = msg
 
     def _tracking_active_callback(self, msg: Bool) -> None:
+        now_s = self._now_s()
         self.tracking_active = bool(msg.data)
-        self.last_tracking_active_time_s = self._now_s()
+        self.last_tracking_active_time_s = now_s
+        if self.tracking_active:
+            if self.tracking_true_since_s is None:
+                self.tracking_true_since_s = now_s
+            self.last_tracking_true_time_s = now_s
+        else:
+            self.tracking_true_since_s = None
 
     def _gimbal_joint_state_callback(self, msg: JointState) -> None:
         positions = {
@@ -236,17 +270,23 @@ class VisualPursuitInterceptor(Node):
         ):
             return
 
-        self.gimbal_yaw_rad = self.gimbal_yaw_sign * float(positions[self.gimbal_yaw_joint_name])
-        self.gimbal_pitch_rad = self.gimbal_pitch_sign * float(positions[self.gimbal_pitch_joint_name])
+        self.gimbal_yaw_rad = self.gimbal_yaw_sign * float(
+            positions[self.gimbal_yaw_joint_name]
+        )
+        self.gimbal_pitch_rad = self.gimbal_pitch_sign * float(
+            positions[self.gimbal_pitch_joint_name]
+        )
         self.last_gimbal_feedback_time_s = self._now_s()
 
     def _timer_callback(self) -> None:
-        now_us = self._now_us()
+        now_s = self._now_s()
+        now_us = int(now_s * 1_000_000)
+        dt_s = self._control_dt_s(now_s)
         self.previous_state = self.state
-        pursuing = self._ready_to_pursue()
+        pursuing = self._ready_to_pursue(now_s)
 
         self._publish_offboard_control_mode(now_us, pursuing)
-        self._publish_setpoint(now_us, pursuing)
+        self._publish_setpoint(now_us, pursuing, dt_s)
 
         warmup_cycles = max(1, int(self.takeoff_warmup_s * self.control_rate_hz))
         if (
@@ -259,30 +299,45 @@ class VisualPursuitInterceptor(Node):
         self._publish_diagnostics(now_us, pursuing)
         self.setpoint_counter += 1
 
-    def _ready_to_pursue(self) -> bool:
+    def _ready_to_pursue(self, now_s: float) -> bool:
         if not self._vehicle_ready():
             self.state = InterceptorState.INITIALIZING
             return False
 
         if not self.initial_hover_reached:
             self.state = InterceptorState.TAKEOFF
-            if self._distance_to(self.initial_hover_position) <= self.hover_acceptance_radius_m:
+            if (
+                self._distance_to(self.initial_hover_position)
+                <= self.hover_acceptance_radius_m
+            ):
                 self.initial_hover_reached = True
                 self.state = InterceptorState.HOLD
             return False
 
-        if not self._fresh_tracking_active():
+        if not self._fresh_gimbal_feedback(now_s):
             self._capture_loss_hold_position_if_needed()
             self.state = InterceptorState.TARGET_LOST
             return False
 
-        if not self._fresh_gimbal_feedback():
-            self._capture_loss_hold_position_if_needed()
-            self.state = InterceptorState.TARGET_LOST
+        if self._tracking_confirmed(now_s):
+            self.state = InterceptorState.PURSUIT
+            return True
+
+        if (
+            self.previous_state == InterceptorState.PURSUIT
+            and self._tracking_recently_active(now_s)
+        ):
+            self.state = InterceptorState.PURSUIT
+            return True
+
+        if self._tracking_signal_active(now_s):
+            self.state = InterceptorState.ACQUIRING
             return False
 
-        self.state = InterceptorState.PURSUIT
-        return True
+        if self.previous_state == InterceptorState.PURSUIT:
+            self._capture_loss_hold_position_if_needed()
+        self.state = InterceptorState.TARGET_LOST
+        return False
 
     def _vehicle_ready(self) -> bool:
         return (
@@ -328,19 +383,32 @@ class VisualPursuitInterceptor(Node):
         dz = float(self.vehicle_local_position.z) - target[2]
         return math.sqrt(dx * dx + dy * dy + dz * dz)
 
-    def _fresh_tracking_active(self) -> bool:
+    def _tracking_signal_active(self, now_s: float) -> bool:
         if not self.tracking_active or self.last_tracking_active_time_s is None:
             return False
-        return self._now_s() - self.last_tracking_active_time_s <= self.tracking_active_timeout_s
+        return now_s - self.last_tracking_active_time_s <= self.tracking_active_timeout_s
 
-    def _fresh_gimbal_feedback(self) -> bool:
+    def _tracking_confirmed(self, now_s: float) -> bool:
+        if (
+            not self._tracking_signal_active(now_s)
+            or self.tracking_true_since_s is None
+        ):
+            return False
+        return now_s - self.tracking_true_since_s >= self.tracking_confirm_s
+
+    def _tracking_recently_active(self, now_s: float) -> bool:
+        if self.last_tracking_true_time_s is None:
+            return False
+        return now_s - self.last_tracking_true_time_s <= self.tracking_loss_grace_s
+
+    def _fresh_gimbal_feedback(self, now_s: float) -> bool:
         if (
             self.gimbal_yaw_rad is None
             or self.gimbal_pitch_rad is None
             or self.last_gimbal_feedback_time_s is None
         ):
             return False
-        return self._now_s() - self.last_gimbal_feedback_time_s <= self.gimbal_feedback_timeout_s
+        return now_s - self.last_gimbal_feedback_time_s <= self.gimbal_feedback_timeout_s
 
     def _publish_offboard_control_mode(self, now_us: int, pursuing: bool) -> None:
         msg = OffboardControlMode()
@@ -354,27 +422,40 @@ class VisualPursuitInterceptor(Node):
         msg.timestamp = now_us
         self.offboard_mode_pub.publish(msg)
 
-    def _publish_setpoint(self, now_us: int, pursuing: bool) -> None:
+    def _publish_setpoint(self, now_us: int, pursuing: bool, dt_s: float) -> None:
         assert self.vehicle_local_position is not None or not pursuing
 
         if pursuing:
-            self._publish_pursuit_setpoint(now_us)
+            self._publish_pursuit_setpoint(now_us, dt_s)
             return
 
         self._publish_hold_setpoint(now_us)
 
-    def _publish_pursuit_setpoint(self, now_us: int) -> None:
+    def _publish_pursuit_setpoint(self, now_us: int, dt_s: float) -> None:
         assert self.vehicle_local_position is not None
         assert self.vehicle_attitude is not None
         assert self.gimbal_yaw_rad is not None
         assert self.gimbal_pitch_rad is not None
 
-        los_body = gimbal_angles_to_body_los(self.gimbal_yaw_rad, self.gimbal_pitch_rad)
-        los_ned = normalize(rotate_body_to_ned(tuple(float(v) for v in self.vehicle_attitude.q), los_body))
+        los_body = gimbal_angles_to_body_los(
+            self.gimbal_yaw_rad,
+            self.gimbal_pitch_rad,
+        )
+        los_ned = normalize(
+            rotate_body_to_ned(
+                tuple(float(value) for value in self.vehicle_attitude.q),
+                los_body,
+            )
+        )
         los_ned = enforce_forward_component(los_ned, self.min_forward_component)
-        velocity_ned = limit_vertical_speed(
+        target_velocity_ned = limit_vertical_speed(
             scale(los_ned, self.pursuit_speed_mps),
             self.max_vertical_speed_mps,
+        )
+        velocity_ned = limit_vector_delta(
+            self.last_velocity_ned,
+            target_velocity_ned,
+            self.max_pursuit_accel_mps2 * max(dt_s, 0.0),
         )
 
         msg = TrajectorySetpoint()
@@ -398,7 +479,11 @@ class VisualPursuitInterceptor(Node):
         self.last_velocity_ned = velocity_ned
 
     def _publish_hold_setpoint(self, now_us: int) -> None:
-        if self.vehicle_local_position is not None and self.vehicle_local_position.xy_valid and self.vehicle_local_position.z_valid:
+        if (
+            self.vehicle_local_position is not None
+            and self.vehicle_local_position.xy_valid
+            and self.vehicle_local_position.z_valid
+        ):
             if not self.hold_position_on_loss or self.hold_position is None:
                 self.hold_position = (
                     float(self.vehicle_local_position.x),
@@ -409,7 +494,11 @@ class VisualPursuitInterceptor(Node):
         if self.hold_position is None:
             return
 
-        self.state = InterceptorState.HOLD if self.state == InterceptorState.INITIALIZING else self.state
+        self.state = (
+            InterceptorState.HOLD
+            if self.state == InterceptorState.INITIALIZING
+            else self.state
+        )
         msg = TrajectorySetpoint()
         msg.position = [self.hold_position[0], self.hold_position[1], self.hold_position[2]]
         msg.velocity = [math.nan, math.nan, math.nan]
@@ -501,6 +590,18 @@ class VisualPursuitInterceptor(Node):
             diagnostic_value("pursuing", pursuing),
             diagnostic_value("initial_hover_reached", self.initial_hover_reached),
             diagnostic_value("tracking_active", self.tracking_active),
+            diagnostic_value(
+                "tracking_confirmed",
+                self._tracking_confirmed(now_us * 1e-6),
+            ),
+            diagnostic_value(
+                "tracking_true_duration_s",
+                self._tracking_true_duration_s(now_us * 1e-6),
+            ),
+            diagnostic_value(
+                "tracking_loss_age_s",
+                self._tracking_loss_age_s(now_us * 1e-6),
+            ),
             diagnostic_value("gimbal_yaw_deg", degrees_or_none(self.gimbal_yaw_rad)),
             diagnostic_value("gimbal_pitch_deg", degrees_or_none(self.gimbal_pitch_rad)),
             diagnostic_value("los_body_x", self.last_los_body[0]),
@@ -521,6 +622,28 @@ class VisualPursuitInterceptor(Node):
 
     def _now_s(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
+
+    def _control_dt_s(self, now_s: float) -> float:
+        if self.last_control_time_s is None:
+            self.last_control_time_s = now_s
+            return 1.0 / max(self.control_rate_hz, 1.0)
+
+        dt_s = max(0.0, now_s - self.last_control_time_s)
+        self.last_control_time_s = now_s
+        return min(dt_s, 0.25)
+
+    def _tracking_true_duration_s(self, now_s: float) -> float | None:
+        if (
+            not self._tracking_signal_active(now_s)
+            or self.tracking_true_since_s is None
+        ):
+            return None
+        return max(0.0, now_s - self.tracking_true_since_s)
+
+    def _tracking_loss_age_s(self, now_s: float) -> float | None:
+        if self.tracking_active or self.last_tracking_true_time_s is None:
+            return None
+        return max(0.0, now_s - self.last_tracking_true_time_s)
 
 
 def gimbal_angles_to_body_los(
@@ -571,6 +694,31 @@ def limit_vertical_speed(
     if abs(vector[2]) <= max_vertical_speed:
         return vector
     return (vector[0], vector[1], math.copysign(max_vertical_speed, vector[2]))
+
+
+def limit_vector_delta(
+    current: tuple[float, float, float],
+    target: tuple[float, float, float],
+    max_delta: float,
+) -> tuple[float, float, float]:
+    if max_delta <= 0.0:
+        return current
+
+    delta = (
+        target[0] - current[0],
+        target[1] - current[1],
+        target[2] - current[2],
+    )
+    delta_norm = math.sqrt(delta[0] ** 2 + delta[1] ** 2 + delta[2] ** 2)
+    if delta_norm <= max_delta or delta_norm <= 1e-9:
+        return target
+
+    ratio = max_delta / delta_norm
+    return (
+        current[0] + delta[0] * ratio,
+        current[1] + delta[1] * ratio,
+        current[2] + delta[2] * ratio,
+    )
 
 
 def normalize(vector: tuple[float, float, float]) -> tuple[float, float, float]:
