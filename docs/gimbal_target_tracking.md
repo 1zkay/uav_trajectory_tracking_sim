@@ -11,6 +11,7 @@
 3. YOLO + BoT-SORT 跟踪结果：`/x500_0/yolo/tracks`，类型为 `vision_msgs/Detection2DArray`。
 4. `Detection2D.id` 表示跨帧持续的 `track_id`，不是单帧检测序号。
 5. 云台节点默认锁定同一个 `track_id`；目标短时丢失时保持原云台指令，丢失超过 `lost_timeout_s` 后释放锁定并允许重新捕获。
+6. `tracking_active` 表示有新鲜目标跟踪结果，`lock_active` 表示目标已经居中且残差稳定，外层拦截导引只使用 `lock_active` 作为追击门控。
 
 数据流如下：
 
@@ -29,6 +30,11 @@ yolo_tracker(BoT-SORT) ──► /x500_0/yolo/tracks
         │                              ▼
         ├────────────────► /fmu/in/gimbal_manager_set_attitude
         └──── configure ─► /fmu/in/vehicle_command
+
+gimbal_target_tracker ──► /x500_0/gimbal_target_tracker/tracking_active
+                      ├──► /x500_0/gimbal_target_tracker/lock_active
+                      ├──► /x500_0/gimbal_target_tracker/error
+                      └──► /x500_0/gimbal_target_tracker/residual_error_rate
 ```
 
 `gimbal_target_tracker` 不控制无人机位置，只控制主机云台。无人机 0 的轨迹跟踪、目标机的轨迹跟踪、BoT-SORT 目标跟踪和云台视觉伺服保持分层独立。
@@ -131,6 +137,19 @@ src/uav_trajectory_tracking/config/gimbal_tracking.yaml
 - `pitch_feedforward_deg_s`
 - `max_yaw_error_integral_deg_s`
 - `max_pitch_error_integral_deg_s`
+- `target_center_filter_alpha`
+- `large_target_area_ratio_start`
+- `large_target_area_ratio_full`
+- `large_target_min_control_scale`
+- `residual_error_rate_filter_alpha`
+- `lock_yaw_error_deg`
+- `lock_pitch_error_deg`
+- `lock_residual_error_rate_deg_s`
+- `unlock_yaw_error_deg`
+- `unlock_pitch_error_deg`
+- `unlock_residual_error_rate_deg_s`
+- `lock_confirm_s`
+- `lock_loss_grace_s`
 - `yaw_error_sign`
 - `pitch_error_sign`
 - `detections_stream_timeout_s`
@@ -143,9 +162,6 @@ src/uav_trajectory_tracking/config/gimbal_tracking.yaml
 - `search_max_yaw_amplitude_deg`
 - `local_search_pitch_bands_deg`
 - `global_search_pitch_levels_deg`
-- `max_tracking_cmd_actual_error_deg`
-- `tracking_cmd_actual_error_timeout_s`
-- `max_search_cmd_actual_error_deg`
 - `command_interface`
 - `hold_last_command_on_loss`
 - `gimbal_yaw_joint_name`
@@ -229,13 +245,15 @@ cmd_pitch = clamp(cmd_pitch + pitch_rate * dt, min_pitch, max_pitch)
 
 诊断话题 `/x500_0/gimbal_target_tracker/error` 中的 `vector.x/y` 现在分别表示 yaw/pitch 视线角误差，单位为 degree，`vector.z` 为目标置信度。
 
+`/x500_0/gimbal_target_tracker/residual_error_rate` 中的 `vector.x/y` 为滤波后的 yaw/pitch 图像残余角速度，单位为 degree/s，`vector.z` 为 `0..1` 的锁定质量。这个话题用于判断目标虽然还在画面中，但云台是否已经稳定到足以让外层导引相信 LOS。
+
 节点默认使用 `stabilization_mode: earth_lock`，在 `/fmu/in/gimbal_manager_set_attitude` 中设置 roll、pitch、yaw lock flags，使 PX4 gimbal manager 负责相对地球系的姿态锁定与机体姿态补偿。节点同时订阅 `/x500_0/gimbal/joint_states` 作为 Gazebo 云台真实关节反馈，用于诊断输出；反馈由 `JointStatePublisher` 发布的 `cgo3_vertical_arm_joint` 和 `cgo3_camera_joint` 提供，再经 `ros_gz_bridge` 桥接到 ROS 2。
 
 关节反馈不会在默认 `earth_lock` 控制过程中覆盖 `cmd_yaw/cmd_pitch`，因此云台指令始终由控制器自身连续积分生成。`initialize_command_from_feedback` 仅用于 `body_follow` 兼容模式：启动阶段如果节点还没有发送过云台命令，第一次有效关节反馈会用来初始化 `cmd_yaw/cmd_pitch`，避免默认 `initial_*` 与真实云台角不一致造成首次 setpoint 跳变。
 
 在 `body_follow` 兼容模式下，tracking 状态会把 `actual_yaw/actual_pitch` 作为 watchdog 输入：如果 `cmd-actual` 最大偏差持续超过 `max_tracking_cmd_actual_error_deg` 且超过 `tracking_cmd_actual_error_timeout_s`，节点进入 `tracking_gimbal_lag`，暂停视觉误差积分和 `cmd` 更新，只继续发布当前 setpoint，等待云台真实姿态追上。默认 `earth_lock` 模式下不使用该 watchdog。
 
-诊断话题 `/x500_0/gimbal_target_tracker/state` 使用 `diagnostic_msgs/DiagnosticArray` 发布控制状态，包含状态机状态、`cmd_yaw/cmd_pitch`、`actual_yaw/actual_pitch`、`cmd_actual_*_error`、`cmd_actual_max_error_deg`、watchdog 状态、误差积分、检测/反馈年龄、搜索中心、搜索 pitch band 和是否已用反馈初始化命令。
+诊断话题 `/x500_0/gimbal_target_tracker/state` 使用 `diagnostic_msgs/DiagnosticArray` 发布控制状态，包含状态机状态、`cmd_yaw/cmd_pitch`、`actual_yaw/actual_pitch`、`lock_active`、`lock_centered`、`lock_residual_rate_ok`、锁定/解锁阈值、残差角速度、watchdog 状态、误差积分、检测/反馈年龄、搜索中心、搜索 pitch band 和是否已用反馈初始化命令。
 
 ## 目标丢失搜索
 
@@ -268,6 +286,45 @@ target_track_id 为空且 lock_target_track=true：自动锁定首次选中的 t
 
 如果只需要每帧跟踪最高置信度目标，可把 `lock_target_track` 设为 `false`。
 
+## 导引头锁定输出
+
+目标 ID 锁定和导引头锁定是两个不同概念：
+
+```text
+tracking_active: 有新鲜、已筛选的 Detection2D 目标
+lock_active:     目标在画面中心附近，残差角速度足够小，云台没有明显滞后
+```
+
+`lock_active` 的候选条件：
+
+```text
+abs(yaw_error_deg) <= lock_yaw_error_deg
+abs(pitch_error_deg) <= lock_pitch_error_deg
+max(abs(residual_yaw_rate), abs(residual_pitch_rate)) <= lock_residual_error_rate_deg_s
+not tracking_gimbal_lag
+```
+
+候选条件持续 `lock_confirm_s` 后置位 `lock_active=true`。已经锁定后使用更宽的解锁阈值：
+
+```text
+unlock_yaw_error_deg
+unlock_pitch_error_deg
+unlock_residual_error_rate_deg_s
+```
+
+如果目标短暂越过解锁阈值，`lock_loss_grace_s` 内仍保持 `lock_active=true`，避免外层拦截器在云台误差边界附近频繁切换控制模式。当前默认值在 `src/uav_trajectory_tracking/config/gimbal_tracking.yaml`：
+
+```yaml
+lock_yaw_error_deg: 10.0
+lock_pitch_error_deg: 10.0
+lock_residual_error_rate_deg_s: 45.0
+unlock_yaw_error_deg: 15.0
+unlock_pitch_error_deg: 15.0
+unlock_residual_error_rate_deg_s: 70.0
+lock_confirm_s: 0.3
+lock_loss_grace_s: 0.4
+```
+
 ## 验证话题
 
 每个新终端执行 ROS 2 命令前都需要先加载本工作区环境，否则 `px4_msgs` 自定义消息无法解析，PX4 相关 topic 的 `ros2 topic echo` 可能会报消息类型无效：
@@ -295,7 +352,9 @@ ros2 topic echo /x500_0/yolo/tracks --once
 ros2 topic echo /x500_0/gimbal/joint_states --once
 ros2 topic echo /fmu/in/gimbal_manager_set_attitude --once
 ros2 topic echo /x500_0/gimbal_target_tracker/error --once
+ros2 topic echo /x500_0/gimbal_target_tracker/residual_error_rate --once
 ros2 topic echo /x500_0/gimbal_target_tracker/tracking_active --once
+ros2 topic echo /x500_0/gimbal_target_tracker/lock_active --once
 ros2 topic echo /x500_0/gimbal_target_tracker/state --once
 ```
 
@@ -316,6 +375,13 @@ ros2 topic echo /x500_0/gimbal_target_tracker/state --once
 6. `/fmu/in/gimbal_manager_set_attitude` 是否持续有 `GimbalManagerSetAttitude`。
 7. `GIMBAL_INPUT_TOPIC` 是否与 `YOLO_TRACKS_TOPIC` 一致。
 
+如果 `tracking_active=true` 但 `lock_active=false`，优先检查：
+
+1. `/x500_0/gimbal_target_tracker/state` 中的 `last_image_yaw_error_deg` 和 `last_image_pitch_error_deg` 是否超过 `lock_*_error_deg`。
+2. `lock_residual_rate_ok` 是否为 `false`；如果是，查看 `/x500_0/gimbal_target_tracker/residual_error_rate`。
+3. 目标接近相机导致 bbox 中心抖动时，适当降低 `target_center_filter_alpha` 以增强平滑，或调低大目标控制缩放的最小值。
+4. 如果误差总是在锁定阈值边缘来回跳，优先调整 `unlock_*` 滞回阈值，而不是继续放宽进入锁定阈值。
+
 如果 `ros2 topic echo /fmu/in/gimbal_manager_set_attitude --once` 提示消息类型无效，优先检查当前终端是否已经 `source install/setup.bash`，并确认 `ros2 interface show px4_msgs/msg/GimbalManagerSetAttitude` 能正常显示字段。
 
 ## 调参建议
@@ -331,10 +397,10 @@ ros2 topic echo /x500_0/gimbal_target_tracker/state --once
 
 ## 局限性
 
-当前实现是基于图像误差的二维视觉伺服，不估计目标三维位置，也不预测目标运动。BoT-SORT 可以提升跨帧目标连续性，但它仍依赖 YOLO 检测结果；当目标长时间遮挡、过小或置信度过低时，track id 可能丢失，并在释放锁定后重新捕获。
+云台节点本身是基于图像误差的二维视觉伺服，不估计目标三维位置，也不预测目标运动。BoT-SORT 可以提升跨帧目标连续性，但它仍依赖 YOLO 检测结果；当目标长时间遮挡、过小或置信度过低时，track id 可能丢失，并在释放锁定后重新捕获。
 
-如果后续要做更强的导引头/制导仿真，可以进一步增加：
+当前 `visual_pursuit_interceptor` 已经在仿真层使用 Gazebo truth 相对位置/速度做外层导引；如果后续要把云台节点升级为真实视觉导引头，可以进一步增加：
 
-- 基于目标速度的前馈补偿；
-- 目标相对方位角、俯仰角估计；
-- 与无人机 0 航迹规划联动，使机体位置和云台角度共同保持目标可见。
+- 单目/多目或融合滤波的目标相对方位、距离和速度估计；
+- 图像测量噪声、遮挡和 ID 切换的滤波；
+- 云台 LOS 角和机体运动的联合估计。

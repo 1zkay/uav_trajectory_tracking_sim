@@ -19,7 +19,8 @@ ros2 topic echo /trajectory_path --once
 ```
 
 `/trajectory_tracker/current_stage` 的阶段编号为：`0=entry`、`1=trajectory`、`2=return`、`3=finished`。
-正常 8 字轨迹应先进入 `entry`，到达曲线起点并稳定后再进入 `trajectory`。
+正常轨迹应先进入 `entry`，到达曲线起点并稳定后再进入 `trajectory`。当前默认主机轨迹是
+`trajectory_hold.yaml` 的 `(1, 2, -5)` 悬停点；切换到 `trajectory_figure8.yaml` 后可用同一阶段逻辑检查 8 字轨迹。
 
 主机云台相机和 YOLO 检测启动后：
 
@@ -45,8 +46,8 @@ RViz 使用 `map` 作为固定坐标系。`trajectory_visualizer` 会把 PX4 本
 目标机 `x500_1` 继续使用普通 `gz_x500` / `PX4_SYS_AUTOSTART=4001`。
 
 Gazebo 静态标记不需要手工改 world。主机启动脚本默认轨迹改
-`src/uav_trajectory_tracking/config/trajectory_figure8.yaml`，目标机轨迹改
-`src/uav_trajectory_tracking/config/target_trajectory.yaml`，然后重启 PX4/Gazebo：
+`src/uav_trajectory_tracking/config/trajectory_hold.yaml`，目标机轨迹改
+`src/uav_trajectory_tracking/config/target_trajectory_linear.yaml`，然后重启 PX4/Gazebo：
 
 ```bash
 ./scripts/start_px4_gazebo.sh
@@ -65,6 +66,38 @@ TRAJECTORY_FILE=/home/zk/my_trajectory.yaml ./scripts/start_px4_gazebo.sh
 TRAJECTORY_FILE=/home/zk/my_trajectory.yaml ./scripts/start_trajectory_tracking.sh
 TRAJECTORY_FILE=/home/zk/my_target_trajectory.yaml ./scripts/start_target_trajectory_tracking.sh
 ```
+
+## 视觉拦截检查
+
+视觉拦截使用独立入口：
+
+```bash
+./scripts/start_visual_interception.sh
+```
+
+它会启动相机桥接、YOLO + BoT-SORT、云台视觉伺服、truth odometry bridge 和 `visual_pursuit_interceptor`。视觉拦截时不要同时运行主机 `start_trajectory_tracking.sh`，否则两个节点会同时向 `/fmu/in/trajectory_setpoint` 发布 setpoint。启动后检查：
+
+```bash
+ros2 topic list | rg 'gimbal_target_tracker|visual_pursuit|odometry_with_covariance'
+ros2 topic echo /x500_0/gimbal_target_tracker/tracking_active --once
+ros2 topic echo /x500_0/gimbal_target_tracker/lock_active --once
+ros2 topic echo /model/x500_0/odometry_with_covariance --once
+ros2 topic echo /model/x500_1/odometry_with_covariance --once
+ros2 topic echo /x500_0/visual_pursuit_interceptor/diagnostics --once
+```
+
+正常进入追击时，诊断应包含：
+
+```text
+state: pursuit
+pursuing: true
+velocity_control_active: true
+lock_active: true
+truth_feedback_fresh: true
+range_m: finite
+```
+
+短暂掉锁时应进入 `coast_on_lock_loss` 并继续 velocity control；如果直接 `target_lost` 或 position hold，优先检查 `lock_loss_grace_s`、truth odometry 是否新鲜，以及云台端 `lock_active` 是否在阈值边缘抖动。
 
 ## 常见问题
 
