@@ -18,7 +18,7 @@ gimbal_target_tracker:
 
     # Camera-calibrated image-plane visual-servo loop. CameraInfo is preferred;
     # fallback intrinsics match the current Gazebo gimbal camera model.
-    control_rate_hz: 30.0
+    control_rate_hz: 50.0
     fallback_fx_px: 410.93927419797166
     fallback_fy_px: 410.93927419797166
     fallback_cx_px: 640.0
@@ -39,11 +39,11 @@ gimbal_target_tracker:
     # residual_error_rate publishes x/y as yaw/pitch image residual angular
     # rates in deg/s and z as a 0..1 lock-quality scalar.
     residual_error_rate_filter_alpha: 0.35
-    lock_yaw_error_deg: 10.0
-    lock_pitch_error_deg: 10.0
+    lock_yaw_error_deg: 15.0
+    lock_pitch_error_deg: 15.0
     lock_residual_error_rate_deg_s: 45.0
-    unlock_yaw_error_deg: 15.0
-    unlock_pitch_error_deg: 15.0
+    unlock_yaw_error_deg: 20.0
+    unlock_pitch_error_deg: 20.0
     unlock_residual_error_rate_deg_s: 70.0
     lock_confirm_s: 0.3
     lock_loss_grace_s: 0.4
@@ -63,8 +63,9 @@ gimbal_target_tracker:
     # Command limits.
     initial_yaw_deg: 0.0
     initial_pitch_deg: 0.0
-    min_yaw_deg: -360.0
-    max_yaw_deg: 360.0
+    # Match the Gazebo/PX4 gimbal yaw joint range in px4_overlays/models.
+    min_yaw_deg: -1.0e16
+    max_yaw_deg: 1.0e16
     min_pitch_deg: -90.0
     max_pitch_deg: 90.0
 

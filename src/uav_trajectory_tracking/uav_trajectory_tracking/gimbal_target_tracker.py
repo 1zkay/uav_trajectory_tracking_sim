@@ -454,6 +454,7 @@ class GimbalTargetTracker(Node):
         self.search_anchor_yaw_deg = self.cmd_yaw_deg
         self.search_anchor_pitch_deg = self.cmd_pitch_deg
         self.search_pitch_band_index = 0
+        self.search_yaw_cycle_index = 0
         self.search_direction = 1.0
         self.search_pitch_target_deg = self.cmd_pitch_deg
         self.search_mode = "none"
@@ -1056,6 +1057,7 @@ class GimbalTargetTracker(Node):
         self.search_start_time_s = None
         self.search_mode = "none"
         self.search_waiting_for_gimbal = False
+        self.search_yaw_cycle_index = 0
 
     def _update_search_command(self, now_s: float, dt_s: float) -> None:
         if self.search_start_time_s is None:
@@ -1071,11 +1073,17 @@ class GimbalTargetTracker(Node):
             if self.search_mode == "local"
             else TrackingState.GLOBAL_SEARCH
         )
+        continuous_global_yaw = (
+            not local_search and self._yaw_limits_are_effectively_unbounded()
+        )
 
         if local_search:
             yaw_min_deg, yaw_max_deg = self._local_search_yaw_limits(
                 search_elapsed_s
             )
+        elif continuous_global_yaw:
+            yaw_min_deg = -math.inf
+            yaw_max_deg = math.inf
         else:
             yaw_min_deg = self.min_yaw_deg
             yaw_max_deg = self.max_yaw_deg
@@ -1087,7 +1095,15 @@ class GimbalTargetTracker(Node):
 
         yaw_step_deg = self.search_direction * self.search_yaw_rate_deg_s * dt_s
         next_yaw_deg = self.cmd_yaw_deg + yaw_step_deg
-        if next_yaw_deg >= yaw_max_deg:
+        if continuous_global_yaw:
+            self.cmd_yaw_deg = next_yaw_deg
+            next_cycle_index = self._global_search_yaw_cycle_index(
+                self.cmd_yaw_deg
+            )
+            while next_cycle_index > self.search_yaw_cycle_index:
+                self.search_yaw_cycle_index += 1
+                self._advance_search_pitch_band()
+        elif next_yaw_deg >= yaw_max_deg:
             self.cmd_yaw_deg = yaw_max_deg
             self.search_direction = -1.0
             self._advance_search_pitch_band()
@@ -1128,6 +1144,9 @@ class GimbalTargetTracker(Node):
     def _set_search_mode(self, search_mode: str) -> None:
         self.search_mode = search_mode
         self.search_pitch_band_index = 0
+        self.search_yaw_cycle_index = self._global_search_yaw_cycle_index(
+            self.cmd_yaw_deg
+        )
         self._set_search_pitch_target()
 
     def _search_anchor_yaw_deg(self, now_s: float) -> float:
@@ -1176,6 +1195,20 @@ class GimbalTargetTracker(Node):
                 self.max_yaw_deg,
             ),
         )
+
+    def _global_search_yaw_cycle_index(self, yaw_deg: float) -> int:
+        if not math.isfinite(yaw_deg):
+            return self.search_yaw_cycle_index
+        yaw_travel_deg = abs(yaw_deg - self.search_anchor_yaw_deg)
+        return int(yaw_travel_deg // 360.0)
+
+    def _yaw_limits_are_effectively_unbounded(self) -> bool:
+        if not (
+            math.isfinite(self.min_yaw_deg)
+            and math.isfinite(self.max_yaw_deg)
+        ):
+            return True
+        return self.max_yaw_deg - self.min_yaw_deg >= 1.0e12
 
     def _advance_search_pitch_band(self) -> None:
         pitch_targets = self._active_search_pitch_targets()
