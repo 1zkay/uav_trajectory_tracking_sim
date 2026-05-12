@@ -13,6 +13,8 @@ SOURCE_COMPONENT="${SOURCE_COMPONENT:-1}"
 TARGET_GZ_MODEL_NAME="${TARGET_GZ_MODEL_NAME:-x500_1}"
 LOG_ROOT="${LOG_ROOT:-}"
 RUN_ID="${RUN_ID:-target_$(date +%Y%m%d_%H%M%S)}"
+PUBLISH_STATE_COMPARE_TOPICS="${PUBLISH_STATE_COMPARE_TOPICS:-true}"
+STATE_COMPARE_TOPIC_PREFIX="${STATE_COMPARE_TOPIC_PREFIX:-/x500_1/state_compare}"
 
 cd "${SIM_ROOT}"
 source /opt/ros/jazzy/setup.bash
@@ -58,6 +60,8 @@ add_launch_arg "trajectory_markers_topic" "/${TARGET_NODE_NAMESPACE}/trajectory_
 add_launch_arg "trajectory_path_topic" "/${TARGET_NODE_NAMESPACE}/trajectory_path"
 add_launch_arg "vehicle_path_topic" "/${TARGET_NODE_NAMESPACE}/vehicle_path"
 add_launch_arg "run_id" "${RUN_ID}"
+add_launch_arg "publish_state_compare_topics" "${PUBLISH_STATE_COMPARE_TOPICS}"
+add_launch_arg "state_compare_topic_prefix" "${STATE_COMPARE_TOPIC_PREFIX}"
 
 # Target UAV tracking should only control the target vehicle trajectory.
 # Keep the host-camera vision and gimbal-servo pipeline owned by

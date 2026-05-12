@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
+from geometry_msgs.msg import Vector3Stamped
 from nav_msgs.msg import Odometry
 from px4_msgs.msg import VehicleAttitude, VehicleLocalPosition, VehicleOdometry
 from rclpy.executors import ExternalShutdownException
@@ -14,8 +15,55 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 
+CompareSpec = tuple[str, str, str, str, str]
+
+STATE_COMPARE_SPECS: tuple[CompareSpec, ...] = (
+    (
+        "position",
+        "px4_position_ned",
+        "truth_position_ned",
+        "position_error_ned",
+        "px4_local_ned",
+    ),
+    (
+        "velocity",
+        "px4_velocity_ned",
+        "truth_velocity_ned",
+        "velocity_error_ned",
+        "px4_local_ned",
+    ),
+    (
+        "acceleration",
+        "px4_acceleration_ned",
+        "truth_acceleration_ned",
+        "acceleration_error_ned",
+        "px4_local_ned",
+    ),
+    (
+        "rpy",
+        "px4_rpy_ned_frd",
+        "truth_rpy_ned_frd",
+        "rpy_error_ned_frd",
+        "px4_local_ned_body_frd",
+    ),
+    (
+        "angular_velocity",
+        "px4_angular_velocity_body_frd",
+        "truth_angular_velocity_body_frd",
+        "angular_velocity_error_body_frd",
+        "body_frd",
+    ),
+)
+STATE_COMPARE_BY_KEY: dict[str, CompareSpec] = {spec[0]: spec for spec in STATE_COMPARE_SPECS}
+STATE_COMPARE_TOPICS: tuple[str, ...] = tuple(
+    topic
+    for _, px4_topic, truth_topic, error_topic, _ in STATE_COMPARE_SPECS
+    for topic in (px4_topic, truth_topic, error_topic)
+)
+
+
 class TrajectoryLogger(Node):
-    """Write PX4 estimated state and Gazebo ground truth odometry to CSV files."""
+    """Write trajectory CSV files and optional online state comparison topics."""
 
     def __init__(self) -> None:
         super().__init__("trajectory_logger")
@@ -26,9 +74,13 @@ class TrajectoryLogger(Node):
         self.declare_parameter("vehicle_attitude_topic", "/fmu/out/vehicle_attitude")
         self.declare_parameter("vehicle_odometry_topic", "/fmu/out/vehicle_odometry")
         self.declare_parameter("gazebo_odometry_topic", "/model/x500_0/odometry_with_covariance")
+        self.declare_parameter("publish_state_compare_topics", True)
+        self.declare_parameter("state_compare_topic_prefix", "state_compare")
 
         self.latest_attitude: VehicleAttitude | None = None
         self.latest_px4_odometry: VehicleOdometry | None = None
+        self.latest_px4_compare: dict[str, tuple[float, float, float]] = {}
+        self.latest_truth_compare: dict[str, tuple[float, float, float]] = {}
         self.last_truth_time_s: float | None = None
         self.last_truth_velocity: tuple[float, float, float] | None = None
         self.ros_start_time_s = self._ros_now_s()
@@ -50,6 +102,12 @@ class TrajectoryLogger(Node):
         attitude_topic = self.get_parameter("vehicle_attitude_topic").value
         px4_odometry_topic = self.get_parameter("vehicle_odometry_topic").value
         gazebo_odometry_topic = self.get_parameter("gazebo_odometry_topic").value
+        self.publish_state_compare_topics = bool(
+            self.get_parameter("publish_state_compare_topics").value
+        )
+        self.state_compare_topic_prefix = normalize_topic_prefix(
+            str(self.get_parameter("state_compare_topic_prefix").value)
+        )
 
         self.create_subscription(
             VehicleLocalPosition,
@@ -76,12 +134,18 @@ class TrajectoryLogger(Node):
             qos_profile,
         )
 
+        self.state_compare_publishers = self._make_state_compare_publishers()
+
         self.get_logger().info(f"Logging trajectories to {self.log_dir}")
         self.get_logger().info(
             "PX4 estimate: "
             f"{local_position_topic}, {attitude_topic}, {px4_odometry_topic}; "
             f"Gazebo truth: {gazebo_odometry_topic}"
         )
+        if self.publish_state_compare_topics:
+            self.get_logger().info(
+                f"Publishing online state comparison topics under {self.state_compare_topic_prefix}"
+            )
 
     def _make_log_dir(self) -> Path:
         log_root = str(self.get_parameter("log_root").value)
@@ -176,6 +240,14 @@ class TrajectoryLogger(Node):
             else "",
         }
         self.px4_writer.writerow(row)
+
+        self._publish_px4_compare_topics(
+            position=(float(msg.x), float(msg.y), float(msg.z)),
+            velocity=(float(msg.vx), float(msg.vy), float(msg.vz)),
+            acceleration=(float(msg.ax), float(msg.ay), float(msg.az)),
+            rpy=(roll, pitch, yaw) if q is not None else None,
+            angular_velocity=angular_velocity if angular_velocity[0] != "" else None,
+        )
 
     def _latest_px4_quaternion(self) -> tuple[float, float, float, float] | None:
         if self.latest_attitude is not None:
@@ -273,6 +345,14 @@ class TrajectoryLogger(Node):
         }
         self.truth_writer.writerow(row)
 
+        self._publish_truth_compare_topics(
+            position=(float(y_enu), float(x_enu), float(-z_enu)),
+            velocity=(vx_ned, vy_ned, vz_ned),
+            acceleration=(ax_ned, ay_ned, az_ned),
+            rpy=(roll_ned, pitch_ned, yaw_ned),
+            angular_velocity=(wx_body_frd, wy_body_frd, wz_body_frd),
+        )
+
     def _truth_acceleration(
         self, sample_time_s: float, velocity: tuple[float, float, float]
     ) -> tuple[float | str, float | str, float | str]:
@@ -294,6 +374,117 @@ class TrajectoryLogger(Node):
             (velocity[1] - previous_velocity[1]) / dt,
             (velocity[2] - previous_velocity[2]) / dt,
         )
+
+    def _make_state_compare_publishers(self) -> dict[str, Any]:
+        if not self.publish_state_compare_topics:
+            return {}
+        return {
+            topic: self.create_publisher(
+                Vector3Stamped,
+                f"{self.state_compare_topic_prefix}/{topic}",
+                10,
+            )
+            for topic in STATE_COMPARE_TOPICS
+        }
+
+    def _publish_px4_compare_topics(
+        self,
+        *,
+        position: tuple[float, float, float],
+        velocity: tuple[float, float, float],
+        acceleration: tuple[float, float, float],
+        rpy: tuple[float, float, float] | None,
+        angular_velocity: tuple[float, float, float] | None,
+    ) -> None:
+        if not self.publish_state_compare_topics:
+            return
+        values: dict[str, tuple[float, float, float]] = {
+            "position": position,
+            "velocity": velocity,
+            "acceleration": acceleration,
+        }
+        if rpy is not None:
+            values["rpy"] = rpy
+        if angular_velocity is not None:
+            values["angular_velocity"] = angular_velocity
+        for key, vector in values.items():
+            self.latest_px4_compare[key] = vector
+            self._publish_compare_vector("px4", key, vector)
+        self._publish_compare_errors()
+
+    def _publish_truth_compare_topics(
+        self,
+        *,
+        position: tuple[float, float, float],
+        velocity: tuple[float, float, float],
+        acceleration: tuple[float | str, float | str, float | str],
+        rpy: tuple[float, float, float],
+        angular_velocity: tuple[float, float, float],
+    ) -> None:
+        if not self.publish_state_compare_topics:
+            return
+        values: dict[str, tuple[float, float, float]] = {
+            "position": position,
+            "velocity": velocity,
+            "rpy": rpy,
+            "angular_velocity": angular_velocity,
+        }
+        if all(value != "" for value in acceleration):
+            values["acceleration"] = (
+                float(acceleration[0]),
+                float(acceleration[1]),
+                float(acceleration[2]),
+            )
+        else:
+            self.latest_truth_compare.pop("acceleration", None)
+        for key, vector in values.items():
+            self.latest_truth_compare[key] = vector
+            self._publish_compare_vector("truth", key, vector)
+        self._publish_compare_errors()
+
+    def _publish_compare_errors(self) -> None:
+        for key, _, _, error_topic, frame_id in STATE_COMPARE_SPECS:
+            if key not in self.latest_px4_compare or key not in self.latest_truth_compare:
+                continue
+            px4 = self.latest_px4_compare[key]
+            truth = self.latest_truth_compare[key]
+            if key == "rpy":
+                error = tuple(wrap_pi(px4[idx] - truth[idx]) for idx in range(3))
+            else:
+                error = tuple(px4[idx] - truth[idx] for idx in range(3))
+            self._publish_vector(error_topic, error, frame_id)
+
+    def _publish_compare_vector(
+        self,
+        source: str,
+        key: str,
+        vector: tuple[float, float, float],
+    ) -> None:
+        _, px4_topic, truth_topic, _, frame_id = STATE_COMPARE_BY_KEY[key]
+        if source == "px4":
+            topic_key = px4_topic
+        elif source == "truth":
+            topic_key = truth_topic
+        else:
+            raise ValueError(f"Unknown state compare source: {source}")
+        self._publish_vector(topic_key, vector, frame_id)
+
+    def _publish_vector(
+        self,
+        topic_key: str,
+        vector: tuple[float, float, float],
+        frame_id: str,
+    ) -> None:
+        publisher = self.state_compare_publishers.get(topic_key)
+        if publisher is None:
+            return
+        msg = Vector3Stamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = frame_id
+        msg.vector.x = float(vector[0])
+        msg.vector.y = float(vector[1])
+        msg.vector.z = float(vector[2])
+        publisher.publish(msg)
 
     def destroy_node(self) -> bool:
         for csv_file in (self.px4_file, self.truth_file):
@@ -513,6 +704,15 @@ def normalize_quaternion(q: tuple[float, float, float, float]) -> tuple[float, f
     if norm <= 1e-12:
         return (1.0, 0.0, 0.0, 0.0)
     return tuple(value / norm for value in q)
+
+
+def wrap_pi(value: float) -> float:
+    return math.atan2(math.sin(value), math.cos(value))
+
+
+def normalize_topic_prefix(prefix: str) -> str:
+    normalized = prefix.strip().rstrip("/")
+    return normalized if normalized else "state_compare"
 
 
 def stamp_to_seconds(stamp: Any) -> float:

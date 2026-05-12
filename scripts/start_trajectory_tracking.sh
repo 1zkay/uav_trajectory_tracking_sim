@@ -6,6 +6,8 @@ SIM_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TRAJECTORY_FILE="${TRAJECTORY_FILE:-${SIM_ROOT}/src/uav_trajectory_tracking/config/trajectory_hold.yaml}"
 LOG_ROOT="${LOG_ROOT:-}"
 RUN_ID="${RUN_ID:-}"
+PUBLISH_STATE_COMPARE_TOPICS="${PUBLISH_STATE_COMPARE_TOPICS:-true}"
+STATE_COMPARE_TOPIC_PREFIX="${STATE_COMPARE_TOPIC_PREFIX:-/x500_0/state_compare}"
 PYTHON_VENV="${PYTHON_VENV:-/home/zk/px4-venv}"
 ENABLE_CAMERA_BRIDGE="${ENABLE_CAMERA_BRIDGE:-true}"
 ENABLE_YOLO_TRACKING="${ENABLE_YOLO_TRACKING:-true}"
@@ -109,8 +111,11 @@ fi
 if [[ -n "${RUN_ID}" ]]; then
   add_launch_arg "run_id" "${RUN_ID}"
 fi
+add_launch_arg "publish_state_compare_topics" "${PUBLISH_STATE_COMPARE_TOPICS}"
+add_launch_arg "state_compare_topic_prefix" "${STATE_COMPARE_TOPIC_PREFIX}"
 
 echo "Launching parametric trajectory tracker with ${TRAJECTORY_FILE}"
+echo "State compare topics: $(launch_arg_value publish_state_compare_topics "${PUBLISH_STATE_COMPARE_TOPICS}") prefix=$(launch_arg_value state_compare_topic_prefix "${STATE_COMPARE_TOPIC_PREFIX}")"
 echo "Camera bridge: $(launch_arg_value enable_camera_bridge "${ENABLE_CAMERA_BRIDGE}") qos=$(launch_arg_value camera_image_bridge_qos "${CAMERA_IMAGE_BRIDGE_QOS}") $(launch_arg_value camera_gazebo_topic "${CAMERA_GAZEBO_TOPIC}") -> $(launch_arg_value camera_image_topic "${CAMERA_IMAGE_TOPIC}")"
 echo "CameraInfo bridge: $(launch_arg_value camera_info_gazebo_topic "${CAMERA_INFO_GAZEBO_TOPIC}") -> $(launch_arg_value camera_info_topic "${CAMERA_INFO_TOPIC}")"
 echo "YOLO tracking: $(launch_arg_value enable_yolo_tracking "${ENABLE_YOLO_TRACKING}") tracks=$(launch_arg_value yolo_tracks_topic "${YOLO_TRACKS_TOPIC}")"

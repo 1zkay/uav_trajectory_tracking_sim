@@ -71,6 +71,8 @@ def generate_launch_description():
     enable_csv_logging = LaunchConfiguration("enable_csv_logging")
     log_root = LaunchConfiguration("log_root")
     run_id = LaunchConfiguration("run_id")
+    publish_state_compare_topics = LaunchConfiguration("publish_state_compare_topics")
+    state_compare_topic_prefix = LaunchConfiguration("state_compare_topic_prefix")
 
     return LaunchDescription(
         [
@@ -300,7 +302,10 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "enable_csv_logging",
                 default_value="true",
-                description="Start trajectory_logger for host x500_0 estimate/truth CSV logs.",
+                description=(
+                    "Start trajectory_logger for host x500_0 estimate/truth CSV logs "
+                    "and optional online state comparison topics."
+                ),
             ),
             DeclareLaunchArgument(
                 "log_root",
@@ -311,6 +316,19 @@ def generate_launch_description():
                 "run_id",
                 default_value="",
                 description="Host trajectory CSV run directory name. Empty uses current timestamp.",
+            ),
+            DeclareLaunchArgument(
+                "publish_state_compare_topics",
+                default_value="true",
+                description=(
+                    "Publish online PX4 estimate vs Gazebo truth comparison topics "
+                    "for position, velocity, acceleration, attitude, and angular velocity."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "state_compare_topic_prefix",
+                default_value="/x500_0/state_compare",
+                description="Topic prefix for online state comparison Vector3Stamped topics.",
             ),
             Node(
                 package="ros_gz_bridge",
@@ -355,6 +373,11 @@ def generate_launch_description():
                         "vehicle_attitude_topic": vehicle_attitude_topic,
                         "vehicle_odometry_topic": vehicle_odometry_topic,
                         "gazebo_odometry_topic": host_truth_odometry_topic,
+                        "publish_state_compare_topics": ParameterValue(
+                            publish_state_compare_topics,
+                            value_type=bool,
+                        ),
+                        "state_compare_topic_prefix": state_compare_topic_prefix,
                     }
                 ],
             ),

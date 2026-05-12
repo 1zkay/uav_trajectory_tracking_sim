@@ -9,6 +9,8 @@ VISUAL_INTERCEPTION_CONFIG_FILE="${VISUAL_INTERCEPTION_CONFIG_FILE:-${SIM_ROOT}/
 ENABLE_CSV_LOGGING="${ENABLE_CSV_LOGGING:-true}"
 LOG_ROOT="${LOG_ROOT:-}"
 RUN_ID="${RUN_ID:-host_$(date +%Y%m%d_%H%M%S)}"
+PUBLISH_STATE_COMPARE_TOPICS="${PUBLISH_STATE_COMPARE_TOPICS:-true}"
+STATE_COMPARE_TOPIC_PREFIX="${STATE_COMPARE_TOPIC_PREFIX:-/x500_0/state_compare}"
 ENABLE_CAMERA_BRIDGE="${ENABLE_CAMERA_BRIDGE:-true}"
 ENABLE_YOLO_TRACKING="${ENABLE_YOLO_TRACKING:-true}"
 ENABLE_YOLO_ANNOTATION="${ENABLE_YOLO_ANNOTATION:-true}"
@@ -130,6 +132,8 @@ add_launch_arg "source_component" "${SOURCE_COMPONENT}"
 add_launch_arg "visual_interception_diagnostics_topic" "${VISUAL_INTERCEPTION_DIAGNOSTICS_TOPIC}"
 add_launch_arg "enable_csv_logging" "${ENABLE_CSV_LOGGING}"
 add_launch_arg "run_id" "${RUN_ID}"
+add_launch_arg "publish_state_compare_topics" "${PUBLISH_STATE_COMPARE_TOPICS}"
+add_launch_arg "state_compare_topic_prefix" "${STATE_COMPARE_TOPIC_PREFIX}"
 
 if [[ -n "${YOLO_TRACKING_CONFIG_FILE:-}" ]]; then
   add_launch_arg "yolo_tracking_config_file" "${YOLO_TRACKING_CONFIG_FILE}"
@@ -143,6 +147,7 @@ fi
 
 echo "Launching visual interception with $(launch_arg_value visual_interception_config_file "${VISUAL_INTERCEPTION_CONFIG_FILE}")"
 echo "CSV logging: $(launch_arg_value enable_csv_logging "${ENABLE_CSV_LOGGING}") run_id=$(launch_arg_value run_id "${RUN_ID}") root=$(launch_arg_value log_root "${LOG_ROOT:-./log/trajectory_runs}")"
+echo "State compare topics: $(launch_arg_value publish_state_compare_topics "${PUBLISH_STATE_COMPARE_TOPICS}") prefix=$(launch_arg_value state_compare_topic_prefix "${STATE_COMPARE_TOPIC_PREFIX}")"
 echo "Camera bridge: $(launch_arg_value enable_camera_bridge "${ENABLE_CAMERA_BRIDGE}") qos=$(launch_arg_value camera_image_bridge_qos "${CAMERA_IMAGE_BRIDGE_QOS}") $(launch_arg_value camera_gazebo_topic "${CAMERA_GAZEBO_TOPIC}") -> $(launch_arg_value camera_image_topic "${CAMERA_IMAGE_TOPIC}")"
 echo "YOLO tracking: $(launch_arg_value enable_yolo_tracking "${ENABLE_YOLO_TRACKING}") tracks=$(launch_arg_value yolo_tracks_topic "${YOLO_TRACKS_TOPIC}")"
 echo "YOLO annotation: $(launch_arg_value enable_yolo_annotation "${ENABLE_YOLO_ANNOTATION}") annotated=$(launch_arg_value yolo_tracks_annotated_image_topic "${YOLO_TRACKS_ANNOTATED_IMAGE_TOPIC}") max_hz=$(launch_arg_value yolo_annotation_max_publish_hz "${YOLO_ANNOTATION_MAX_PUBLISH_HZ}")"

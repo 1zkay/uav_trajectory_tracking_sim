@@ -276,10 +276,14 @@ WIND_FILE=/home/zk/uav_trajectory_tracking_sim/src/uav_trajectory_tracking/confi
 `/fmu/out/vehicle_odometry`。Gazebo 真值 CSV 中的速度会先由 body FLU 旋转到 NED，
 姿态会由 ENU/FLU 转为 NED/FRD；真值加速度由转换后的 NED 速度差分得到；
 PX4 估计 CSV 中的加速度直接来自 `VehicleLocalPosition.ax/ay/az`。
+logger 同时会发布位置、速度、加速度、姿态和角速度的在线对比话题，主机默认前缀为
+`/x500_0/state_compare`，目标机脚本默认前缀为 `/x500_1/state_compare`，可直接在
+Foxglove `Plot` 面板中画 `vector.x/y/z`。
 两份 CSV 都保留 `ros_time_s` / `ros_elapsed_s`；其中 `ros_time_s` 是写入时的系统时间，
 `ros_elapsed_s` 是 logger 启动后的相对时间。PX4 表额外写入 `px4_time_s` 和
 `px4_elapsed_s`，Gazebo 表额外写入 `gazebo_time_s` 和 `gazebo_elapsed_s`。
-画图和误差分析优先使用 `px4_elapsed_s` / `gazebo_elapsed_s` 作为横轴。
+跨表误差分析优先用 `ros_time_s` 或 `ros_elapsed_s` 做最近邻/插值对齐；`px4_elapsed_s`
+和 `gazebo_elapsed_s` 只适合同一来源内部分析，不应直接互相对齐。
 
 可以指定日志根目录或本次运行名。视觉拦截链路同样支持这些变量：
 
@@ -295,6 +299,16 @@ LOG_ROOT=/home/zk/uav_logs RUN_ID=host_intercept_01 ./scripts/start_visual_inter
 ENABLE_CSV_LOGGING=false ./scripts/start_visual_interception.sh
 ```
 
+`enable_csv_logging:=false` 会关闭 `trajectory_logger`，因此也不会发布在线对比话题。
+如果只是不需要在线对比、仍要保留 CSV，使用下面的开关。
+
+不需要在线对比话题时：
+
+```bash
+PUBLISH_STATE_COMPARE_TOPICS=false ./scripts/start_trajectory_tracking.sh
+PUBLISH_STATE_COMPARE_TOPICS=false ./scripts/start_visual_interception.sh
+```
+
 ## 可视化话题
 
 - `/fmu/out/vehicle_status_v4`: 主机 PX4 状态，包括导航状态、解锁状态和 failsafe 相关状态。
@@ -302,6 +316,21 @@ ENABLE_CSV_LOGGING=false ./scripts/start_visual_interception.sh
 - `/fmu/out/vehicle_attitude`: 主机 PX4 姿态估计，`q` 为 body FRD 到 local NED 的四元数，顺序为 `w,x,y,z`。
 - `/fmu/out/vehicle_odometry`: 主机 PX4 里程计估计，包含位置、姿态、速度、body FRD 角速度和方差。
 - `/model/x500_0/odometry_with_covariance`: 主机 Gazebo truth odometry。位置原始坐标系为 Gazebo ENU；twist 按 `child_frame_id` 在 body FLU 下表达，`trajectory_logger` 会转换出 NED/FRD 等效列。
+- `/x500_0/state_compare/px4_position_ned`: 主机 PX4 估计位置，`vector.x/y/z = N/E/D`。
+- `/x500_0/state_compare/truth_position_ned`: 主机 Gazebo truth 转换后的 NED 位置。
+- `/x500_0/state_compare/position_error_ned`: 主机位置误差，`PX4 - truth`，`vector.x/y/z = N/E/D`。
+- `/x500_0/state_compare/px4_velocity_ned`: 主机 PX4 估计速度，`vector.x/y/z = N/E/D`。
+- `/x500_0/state_compare/truth_velocity_ned`: 主机 Gazebo truth 转换后的 NED 速度。
+- `/x500_0/state_compare/velocity_error_ned`: 主机速度误差，`PX4 - truth`。
+- `/x500_0/state_compare/px4_acceleration_ned`: 主机 PX4 估计加速度，`vector.x/y/z = N/E/D`，单位为 `m/s^2`。
+- `/x500_0/state_compare/truth_acceleration_ned`: 主机 Gazebo truth NED 速度差分得到的加速度，单位为 `m/s^2`。
+- `/x500_0/state_compare/acceleration_error_ned`: 主机加速度误差，`PX4 - truth`，单位为 `m/s^2`。
+- `/x500_0/state_compare/px4_rpy_ned_frd`: 主机 PX4 姿态估计，`vector.x/y/z = roll/pitch/yaw`。
+- `/x500_0/state_compare/truth_rpy_ned_frd`: 主机 Gazebo truth 转换后的 NED/FRD 姿态。
+- `/x500_0/state_compare/rpy_error_ned_frd`: 主机姿态误差，`PX4 - truth`，yaw 误差会 wrap 到 `[-pi, pi]`。
+- `/x500_0/state_compare/px4_angular_velocity_body_frd`: 主机 PX4 body FRD 角速度。
+- `/x500_0/state_compare/truth_angular_velocity_body_frd`: 主机 Gazebo truth 转换后的 body FRD 角速度。
+- `/x500_0/state_compare/angular_velocity_error_body_frd`: 主机角速度误差，`PX4 - truth`。
 - `/fmu/in/offboard_control_mode`: 主机 PX4 Offboard 控制模式输入。
 - `/fmu/in/trajectory_setpoint`: 主机 PX4 轨迹/速度 setpoint 输入，轨迹跟踪或视觉拦截控制器会发布到这里。
 - `/fmu/in/vehicle_command`: 主机 PX4 MAVLink 命令输入，例如切模式、解锁、降落和云台配置。
