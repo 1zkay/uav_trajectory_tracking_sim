@@ -167,7 +167,6 @@ src/uav_trajectory_tracking/config/gimbal_tracking.yaml
 - `hold_last_command_on_loss`
 - `gimbal_yaw_joint_name`
 - `gimbal_pitch_joint_name`
-- `initialize_command_from_feedback`
 - `configure_gimbal_manager`
 - `configure_retry_period_s`
 - `configure_max_attempts`
@@ -244,19 +243,17 @@ cmd_pitch = clamp(cmd_pitch + pitch_rate * dt, min_pitch, max_pitch)
 
 节点仍会通过 `/fmu/in/vehicle_command` 发送 `MAV_CMD_DO_GIMBAL_MANAGER_CONFIGURE`，把当前 `source_system/source_component` 设置为 gimbal manager primary control。节点会订阅 `/fmu/out/vehicle_command_ack`，在收到 accepted ACK 前按 `configure_retry_period_s` 周期重试，避免 PX4/gimbal 尚未准备好时一次性配置丢失。如需回退到旧实现，可将 `command_interface` 改为 `vehicle_command`，此时会连续发送 `MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW`。
 
-诊断话题 `/x500_0/gimbal_target_tracker/error` 中的 `vector.x/y` 现在分别表示 yaw/pitch 视线角误差，单位为 degree，`vector.z` 为目标置信度。
+诊断话题 `/x500_0/gimbal_target_tracker/error` 中的 `vector.x/y` 现在分别表示原始 yaw/pitch 视线角误差，单位为 degree，`vector.z` 为目标置信度。`header.stamp` 优先使用选中检测的图像源时间戳，供拦截节点 DKF 做延迟补偿；云台控制内部仍可对该误差使用 `deadband_angle_deg`。
 
 `/x500_0/gimbal_target_tracker/residual_error_rate` 中的 `vector.x/y` 为滤波后的 yaw/pitch 图像残余角速度，单位为 degree/s，`vector.z` 为 `0..1` 的锁定质量。这个话题用于判断目标虽然还在画面中，但云台是否已经稳定到足以让外层导引相信 LOS。
 
 节点默认使用 `stabilization_mode: earth_lock`，在 `/fmu/in/gimbal_manager_set_attitude` 中设置 roll、pitch、yaw lock flags，使 PX4 gimbal manager 负责相对地球系的姿态锁定与机体姿态补偿。节点同时订阅 `/x500_0/gimbal/joint_states` 作为 Gazebo 云台真实关节反馈，用于诊断输出；反馈由 `JointStatePublisher` 发布的 `cgo3_vertical_arm_joint` 和 `cgo3_camera_joint` 提供，再经 `ros_gz_bridge` 桥接到 ROS 2。
 
-关节反馈不会在默认 `earth_lock` 控制过程中覆盖 `cmd_yaw/cmd_pitch`，因此云台指令始终由控制器自身连续积分生成。`initialize_command_from_feedback` 仅用于 `body_follow` 兼容模式：启动阶段如果节点还没有发送过云台命令，第一次有效关节反馈会用来初始化 `cmd_yaw/cmd_pitch`，避免默认 `initial_*` 与真实云台角不一致造成首次 setpoint 跳变。
-
-在 `body_follow` 兼容模式下，tracking 状态会把 `actual_yaw/actual_pitch` 作为 watchdog 输入：如果 `cmd-actual` 最大偏差持续超过 `max_tracking_cmd_actual_error_deg` 且超过 `tracking_cmd_actual_error_timeout_s`，节点进入 `tracking_gimbal_lag`，暂停视觉误差积分和 `cmd` 更新，只继续发布当前 setpoint，等待云台真实姿态追上。默认 `earth_lock` 模式下不使用该 watchdog。
+关节反馈不会在默认 `earth_lock` 控制过程中覆盖 `cmd_yaw/cmd_pitch`，因此云台指令始终由控制器自身连续积分生成。
 
 控制状态话题 `/x500_0/gimbal_target_tracker/search_active` 使用 `std_msgs/Bool` 发布云台是否正在执行 `local_search` 或 `global_search`。外层控制器应订阅这个明确语义的话题，而不是依赖诊断字段。
 
-诊断话题 `/x500_0/gimbal_target_tracker/state` 使用 `diagnostic_msgs/DiagnosticArray` 发布观测状态，包含状态机状态、`cmd_yaw/cmd_pitch`、`actual_yaw/actual_pitch`、`lock_active`、`lock_centered`、`lock_residual_rate_ok`、锁定/解锁阈值、残差角速度、watchdog 状态、误差积分、检测/反馈年龄、搜索中心、搜索 pitch band 和是否已用反馈初始化命令。
+诊断话题 `/x500_0/gimbal_target_tracker/state` 使用 `diagnostic_msgs/DiagnosticArray` 发布观测状态，包含状态机状态、`cmd_yaw/cmd_pitch`、`actual_yaw/actual_pitch`、`lock_active`、`lock_centered`、`lock_residual_rate_ok`、锁定/解锁阈值、残差角速度、误差积分、检测/反馈年龄、搜索中心和搜索 pitch band。
 
 ## 目标丢失搜索
 
@@ -271,9 +268,7 @@ global_search:       局部扫描超过 local_search_duration_s 后，在完整 
 
 如果是 `vision_stream_lost`，节点不会主动搜索，因为这通常表示 YOLO 节点或上游图像链路异常，而不是目标飞出视场。此时节点只保持最后 setpoint 并在 `/x500_0/gimbal_target_tracker/state` 中报警。
 
-如果检测流正常但没有目标，节点先短时保持最后 `cmd_yaw/cmd_pitch`。超过 `search_after_lost_s` 后进入搜索：默认 `earth_lock` 模式下，`local_search` 以当前 `cmd_yaw/cmd_pitch` 为中心；`body_follow` 兼容模式下，如果有新鲜反馈，则以 `actual_yaw/actual_pitch` 为中心。yaw 按 `search_yaw_rate_deg_s` 左右扫描，扫描幅度从 `search_initial_yaw_amplitude_deg` 逐步扩大到 `search_max_yaw_amplitude_deg`，pitch 按 `local_search_pitch_bands_deg` 做相对丢失角的分层切换。局部搜索超时后进入 `global_search`，在 `min_yaw_deg/max_yaw_deg` 范围内继续蛇形扫描，但 pitch 改用 `global_search_pitch_levels_deg` 中的绝对俯仰层，默认从水平 `0 deg` 开始。这样全局搜索不会因为丢失时云台已经指向错误 pitch 而一直围绕错误角度扫描。一旦重新收到符合筛选条件的目标，节点重置搜索状态并回到视觉伺服闭环。
-
-搜索时 `actual_yaw/actual_pitch` 仍不覆盖运行中的 `cmd_yaw/cmd_pitch`。在 `body_follow` 兼容模式下，它们用于选择搜索中心和监控云台是否跟得上搜索命令。`max_search_cmd_actual_error_deg` 大于 0 时，如果 `cmd-actual` 超过该阈值，搜索会暂停推进并等待云台跟上；默认 `earth_lock` 模式下不使用该 watchdog。
+如果检测流正常但没有目标，节点先短时保持最后 `cmd_yaw/cmd_pitch`。超过 `search_after_lost_s` 后进入搜索：`local_search` 以当前 `cmd_yaw/cmd_pitch` 为中心；当使用角速度 setpoint 且有新鲜关节反馈时，搜索锚点使用 `actual_yaw/actual_pitch`，避免连续 yaw 下内部命令角和真实关节角漂移。yaw 按 `search_yaw_rate_deg_s` 左右扫描，扫描幅度从 `search_initial_yaw_amplitude_deg` 逐步扩大到 `search_max_yaw_amplitude_deg`，pitch 按 `local_search_pitch_bands_deg` 做相对丢失角的分层切换。局部搜索超时后进入 `global_search`，在 `min_yaw_deg/max_yaw_deg` 范围内继续蛇形扫描，但 pitch 改用 `global_search_pitch_levels_deg` 中的绝对俯仰层，默认从水平 `0 deg` 开始。这样全局搜索不会因为丢失时云台已经指向错误 pitch 而一直围绕错误角度扫描。一旦重新收到符合筛选条件的目标，节点重置搜索状态并回到视觉伺服闭环。
 
 注意：本机 PX4 的 `/home/zk/PX4-Autopilot/src/modules/uxrce_dds_client/dds_topics.yaml` 已加入 `/fmu/in/gimbal_manager_set_attitude`。修改该文件后需要重新启动 `scripts/start_px4_gazebo.sh`，让 PX4 重新构建并生成 XRCE-DDS topic 支持。
 
@@ -295,7 +290,7 @@ target_track_id 为空且 lock_target_track=true：自动锁定首次选中的 t
 
 ```text
 tracking_active: 有新鲜、已筛选的 Detection2D 目标
-lock_active:     目标在画面中心附近，残差角速度足够小，云台没有明显滞后
+lock_active:     目标在画面中心附近，残差角速度足够小
 ```
 
 `lock_active` 的候选条件：
@@ -304,7 +299,6 @@ lock_active:     目标在画面中心附近，残差角速度足够小，云台
 abs(yaw_error_deg) <= lock_yaw_error_deg
 abs(pitch_error_deg) <= lock_pitch_error_deg
 max(abs(residual_yaw_rate), abs(residual_pitch_rate)) <= lock_residual_error_rate_deg_s
-not tracking_gimbal_lag
 ```
 
 候选条件持续 `lock_confirm_s` 后置位 `lock_active=true`。已经锁定后使用更宽的解锁阈值：
@@ -402,7 +396,7 @@ ros2 topic echo /x500_0/gimbal_target_tracker/state --once
 
 云台节点本身是基于图像误差的二维视觉伺服，不估计目标三维位置，也不预测目标运动。BoT-SORT 可以提升跨帧目标连续性，但它仍依赖 YOLO 检测结果；当目标长时间遮挡、过小或置信度过低时，track id 可能丢失，并在释放锁定后重新捕获。
 
-当前 `visual_pursuit_interceptor` 默认使用云台关节反馈和本节点的 `/x500_0/gimbal_target_tracker/error` 构造视觉 LOS，并按论文式 PNG 速度角更新做外层导引。云台节点仍然不估计目标距离或目标运动；如果后续要增强真实视觉导引头，可以进一步增加：
+当前 `visual_pursuit_interceptor` 默认使用本节点外发的原始图像角误差和云台关节反馈构造视觉 LOS；拦截节点内部对图像角误差做 DKF 延迟补偿，并按论文式 PNG 速度角更新做外层导引。云台节点仍然不估计目标距离或目标运动；如果后续要增强真实视觉导引头，可以进一步增加：
 
 - 单目/多目或融合滤波的目标相对方位、距离和速度估计；
 - 图像测量噪声、遮挡和 ID 切换的滤波；

@@ -55,6 +55,164 @@ class GimbalCameraKinematics:
     optical_axis_sensor: Vector3
 
 
+@dataclass
+class KalmanAxisState:
+    position_rad: float
+    rate_rad_s: float
+    p00: float
+    p01: float
+    p11: float
+    time_s: float
+
+
+class DelayedKalmanAxis:
+    """Constant-velocity delayed Kalman filter for one image residual angle."""
+
+    def __init__(
+        self,
+        measurement_noise_std_rad: float,
+        process_noise_std_rad_s2: float,
+        max_prediction_s: float,
+    ) -> None:
+        self.measurement_variance = (
+            measurement_noise_std_rad * measurement_noise_std_rad
+        )
+        self.accel_variance = process_noise_std_rad_s2 * process_noise_std_rad_s2
+        self.max_prediction_s = max_prediction_s
+        self.state: KalmanAxisState | None = None
+
+    def reset(self) -> None:
+        self.state = None
+
+    def update(self, measurement_rad: float, measurement_time_s: float) -> None:
+        if self.state is None or measurement_time_s < self.state.time_s - 1e-6:
+            self._initialize(measurement_rad, measurement_time_s)
+            return
+
+        self._predict_in_place(measurement_time_s - self.state.time_s)
+        assert self.state is not None
+        residual = measurement_rad - self.state.position_rad
+
+        innovation_variance = self.state.p00 + self.measurement_variance
+        if innovation_variance <= 1e-12:
+            return
+
+        gain_position = self.state.p00 / innovation_variance
+        gain_rate = self.state.p01 / innovation_variance
+        p00 = self.state.p00
+        p01 = self.state.p01
+        p11 = self.state.p11
+
+        position_rad = self.state.position_rad + gain_position * residual
+
+        self.state = KalmanAxisState(
+            position_rad=position_rad,
+            rate_rad_s=self.state.rate_rad_s + gain_rate * residual,
+            p00=max((1.0 - gain_position) * p00, 1e-12),
+            p01=(1.0 - gain_position) * p01,
+            p11=max(p11 - gain_rate * p01, 1e-12),
+            time_s=measurement_time_s,
+        )
+
+    def predict(self, target_time_s: float) -> tuple[float, float, float] | None:
+        if self.state is None:
+            return None
+
+        dt_s = clamp(target_time_s - self.state.time_s, 0.0, self.max_prediction_s)
+        position_rad = self.state.position_rad + self.state.rate_rad_s * dt_s
+        return position_rad, self.state.rate_rad_s, dt_s
+
+    def _initialize(self, measurement_rad: float, measurement_time_s: float) -> None:
+        initial_rate_std_rad_s = max(
+            1.0,
+            math.sqrt(self.accel_variance) * self.max_prediction_s,
+        )
+        self.state = KalmanAxisState(
+            position_rad=measurement_rad,
+            rate_rad_s=0.0,
+            p00=max(self.measurement_variance, 1e-12),
+            p01=0.0,
+            p11=initial_rate_std_rad_s * initial_rate_std_rad_s,
+            time_s=measurement_time_s,
+        )
+
+    def _predict_in_place(self, dt_s: float) -> None:
+        assert self.state is not None
+        if dt_s <= 1e-9:
+            return
+
+        q00 = 0.25 * self.accel_variance * dt_s ** 4
+        q01 = 0.5 * self.accel_variance * dt_s ** 3
+        q11 = self.accel_variance * dt_s * dt_s
+        position_rad = self.state.position_rad + self.state.rate_rad_s * dt_s
+
+        self.state = KalmanAxisState(
+            position_rad=position_rad,
+            rate_rad_s=self.state.rate_rad_s,
+            p00=(
+                self.state.p00
+                + 2.0 * dt_s * self.state.p01
+                + dt_s * dt_s * self.state.p11
+                + q00
+            ),
+            p01=self.state.p01 + dt_s * self.state.p11 + q01,
+            p11=self.state.p11 + q11,
+            time_s=self.state.time_s + dt_s,
+        )
+
+
+class ImageErrorDelayedKalmanFilter:
+    """Delayed Kalman filter for signed yaw/pitch image residual angles."""
+
+    def __init__(
+        self,
+        measurement_noise_std_rad: float,
+        process_noise_std_rad_s2: float,
+        max_prediction_s: float,
+    ) -> None:
+        self.yaw = DelayedKalmanAxis(
+            measurement_noise_std_rad,
+            process_noise_std_rad_s2,
+            max_prediction_s,
+        )
+        self.pitch = DelayedKalmanAxis(
+            measurement_noise_std_rad,
+            process_noise_std_rad_s2,
+            max_prediction_s,
+        )
+
+    def reset(self) -> None:
+        self.yaw.reset()
+        self.pitch.reset()
+
+    def update(
+        self,
+        yaw_error_rad: float,
+        pitch_error_rad: float,
+        measurement_time_s: float,
+    ) -> None:
+        self.yaw.update(yaw_error_rad, measurement_time_s)
+        self.pitch.update(pitch_error_rad, measurement_time_s)
+
+    def predict(
+        self,
+        target_time_s: float,
+    ) -> tuple[float, float, float, float, float] | None:
+        yaw = self.yaw.predict(target_time_s)
+        pitch = self.pitch.predict(target_time_s)
+        if yaw is None or pitch is None:
+            return None
+        yaw_error_rad, yaw_rate_rad_s, yaw_horizon_s = yaw
+        pitch_error_rad, pitch_rate_rad_s, pitch_horizon_s = pitch
+        return (
+            yaw_error_rad,
+            pitch_error_rad,
+            yaw_rate_rad_s,
+            pitch_rate_rad_s,
+            max(yaw_horizon_s, pitch_horizon_s),
+        )
+
+
 class VisualPursuitInterceptor(Node):
     """Intercept using gimbal lock as seeker input and image-based PNG guidance."""
 
@@ -128,6 +286,23 @@ class VisualPursuitInterceptor(Node):
         )
         self.visual_error_yaw_sign = float(config.get("visual_error_yaw_sign", 1.0))
         self.visual_error_pitch_sign = float(config.get("visual_error_pitch_sign", 1.0))
+        self.dkf_enabled = bool(config.get("dkf_enabled", True))
+        self.dkf_measurement_delay_s = nonnegative_float(
+            config.get("dkf_measurement_delay_s", 0.05),
+            "dkf_measurement_delay_s",
+        )
+        self.dkf_measurement_noise_std_rad = positive_float(
+            config.get("dkf_measurement_noise_std_rad", math.radians(1.0)),
+            "dkf_measurement_noise_std_rad",
+        )
+        self.dkf_process_noise_std_rad_s2 = positive_float(
+            config.get("dkf_process_noise_std_rad_s2", 4.0),
+            "dkf_process_noise_std_rad_s2",
+        )
+        self.dkf_max_prediction_s = positive_float(
+            config.get("dkf_max_prediction_s", self.visual_error_timeout_s),
+            "dkf_max_prediction_s",
+        )
         self.min_velocity_direction_mps = nonnegative_float(
             config.get("min_velocity_direction_mps", 0.2),
             "min_velocity_direction_mps",
@@ -250,6 +425,21 @@ class VisualPursuitInterceptor(Node):
         self.image_pitch_error_rad: float | None = None
         self.image_error_score: float | None = None
         self.last_visual_error_time_s: float | None = None
+        self.image_error_dkf = ImageErrorDelayedKalmanFilter(
+            self.dkf_measurement_noise_std_rad,
+            self.dkf_process_noise_std_rad_s2,
+            self.dkf_max_prediction_s,
+        )
+        self.dkf_yaw_error_rad: float | None = None
+        self.dkf_pitch_error_rad: float | None = None
+        self.dkf_yaw_rate_rad_s: float | None = None
+        self.dkf_pitch_rate_rad_s: float | None = None
+        self.dkf_prediction_horizon_s: float | None = None
+        self.dkf_last_measurement_time_s: float | None = None
+        self.dkf_last_source_stamp_s: float | None = None
+        self.dkf_source_stamp_offset_s: float | None = None
+        self.dkf_measurement_time_source = "none"
+        self.dkf_measurement_delay_observed_s: float | None = None
         self.takeoff_position: tuple[float, float, float] | None = None
         self.takeoff_altitude_reached = False
         self.hold_position: tuple[float, float, float] | None = None
@@ -377,6 +567,8 @@ class VisualPursuitInterceptor(Node):
             f"{self.initial_hover_position[2]:.2f}) m NED, "
             f"closing_speed={self.pursuit_speed_mps:.2f} m/s, "
             f"png_gains=({self.png_vertical_gain:.2f}, {self.png_horizontal_gain:.2f}), "
+            f"dkf_enabled={self.dkf_enabled}, "
+            f"dkf_delay={self.dkf_measurement_delay_s:.3f} s, "
             f"gimbal_joints=({self.gimbal_yaw_joint_name}, {self.gimbal_pitch_joint_name}), "
             f"roll_joint={self.gimbal_roll_joint_name}, "
             f"vertical_search={self.search_vertical_motion_enabled}, "
@@ -411,6 +603,13 @@ class VisualPursuitInterceptor(Node):
         self.vehicle_attitude = msg
 
     def _gimbal_error_callback(self, msg: Vector3Stamped) -> None:
+        now_s = self._now_s()
+        if (
+            self.last_visual_error_time_s is not None
+            and now_s - self.last_visual_error_time_s > self.visual_error_timeout_s
+        ):
+            self._reset_image_error_dkf()
+
         self.image_yaw_error_rad = math.radians(
             self.visual_error_yaw_sign * float(msg.vector.x)
         )
@@ -418,7 +617,20 @@ class VisualPursuitInterceptor(Node):
             self.visual_error_pitch_sign * float(msg.vector.y)
         )
         self.image_error_score = float(msg.vector.z)
-        self.last_visual_error_time_s = self._now_s()
+        self.last_visual_error_time_s = now_s
+        if self.dkf_enabled:
+            measurement_time_s = self._visual_measurement_time_s(msg, now_s)
+            if (
+                self.dkf_last_measurement_time_s is None
+                or measurement_time_s > self.dkf_last_measurement_time_s + 1e-6
+            ):
+                self.image_error_dkf.update(
+                    self.image_yaw_error_rad,
+                    self.image_pitch_error_rad,
+                    measurement_time_s,
+                )
+                self.dkf_last_measurement_time_s = measurement_time_s
+            self._update_dkf_prediction(now_s)
 
     def _tracking_active_callback(self, msg: Bool) -> None:
         now_s = self._now_s()
@@ -740,7 +952,7 @@ class VisualPursuitInterceptor(Node):
         )
         self.last_gimbal_los_ned = gimbal_los_ned
 
-        visual_los_body = self._visual_los_body()
+        visual_los_body = self._visual_los_body(now_us * 1e-6)
         guidance_los_ned = normalize(
             rotate_body_to_ned(
                 tuple(float(value) for value in self.vehicle_attitude.q),
@@ -804,21 +1016,112 @@ class VisualPursuitInterceptor(Node):
         self.last_commanded_closing_speed_mps = 0.0
         self.last_velocity_setpoint_ned = velocity_setpoint_ned
 
-    def _visual_los_body(self) -> Vector3:
-        assert self.image_yaw_error_rad is not None
-        assert self.image_pitch_error_rad is not None
+    def _visual_los_body(self, now_s: float) -> Vector3:
         assert self.gimbal_yaw_rad is not None
         assert self.gimbal_pitch_rad is not None
         assert self.gimbal_roll_rad is not None
 
+        image_yaw_error_rad, image_pitch_error_rad = self._guidance_image_error(now_s)
         return gimbal_image_error_to_body_los(
             self.gimbal_yaw_rad,
             self.gimbal_roll_rad,
             self.gimbal_pitch_rad,
-            self.image_yaw_error_rad,
-            self.image_pitch_error_rad,
+            image_yaw_error_rad,
+            image_pitch_error_rad,
             self.gimbal_kinematics,
         )
+
+    def _guidance_image_error(self, now_s: float) -> tuple[float, float]:
+        assert self.image_yaw_error_rad is not None
+        assert self.image_pitch_error_rad is not None
+        if self.dkf_enabled:
+            self._update_dkf_prediction(now_s)
+            if (
+                self.dkf_yaw_error_rad is not None
+                and self.dkf_pitch_error_rad is not None
+            ):
+                return self.dkf_yaw_error_rad, self.dkf_pitch_error_rad
+        return self.image_yaw_error_rad, self.image_pitch_error_rad
+
+    def _visual_measurement_time_s(
+        self,
+        msg: Vector3Stamped,
+        now_s: float,
+    ) -> float:
+        stamp_s = stamp_to_seconds(msg.header.stamp.sec, msg.header.stamp.nanosec)
+        max_plausible_delay_s = max(
+            1.0,
+            self.visual_error_timeout_s
+            + self.dkf_max_prediction_s
+            + self.dkf_measurement_delay_s,
+        )
+        if stamp_s is not None:
+            observed_delay_s = now_s - stamp_s
+            if 0.0 <= observed_delay_s <= max_plausible_delay_s:
+                self.dkf_measurement_time_source = "header"
+                self.dkf_measurement_delay_observed_s = observed_delay_s
+                self.dkf_last_source_stamp_s = stamp_s
+                return stamp_s
+
+            if (
+                self.dkf_source_stamp_offset_s is None
+                or self.dkf_last_source_stamp_s is None
+                or stamp_s < self.dkf_last_source_stamp_s - 1e-6
+            ):
+                self.dkf_source_stamp_offset_s = (
+                    now_s - stamp_s - self.dkf_measurement_delay_s
+                )
+
+            measurement_time_s = stamp_s + self.dkf_source_stamp_offset_s
+            observed_delay_s = now_s - measurement_time_s
+            if 0.0 <= observed_delay_s <= max_plausible_delay_s:
+                self.dkf_measurement_time_source = "header_mapped"
+                self.dkf_measurement_delay_observed_s = observed_delay_s
+                self.dkf_last_source_stamp_s = stamp_s
+                return measurement_time_s
+
+            self.dkf_source_stamp_offset_s = (
+                now_s - stamp_s - self.dkf_measurement_delay_s
+            )
+            self.dkf_measurement_time_source = "header_mapped_reset"
+            self.dkf_measurement_delay_observed_s = self.dkf_measurement_delay_s
+            self.dkf_last_source_stamp_s = stamp_s
+            return now_s - self.dkf_measurement_delay_s
+
+        self.dkf_measurement_time_source = "fixed_delay"
+        self.dkf_measurement_delay_observed_s = self.dkf_measurement_delay_s
+        return now_s - self.dkf_measurement_delay_s
+
+    def _update_dkf_prediction(self, now_s: float) -> None:
+        estimate = self.image_error_dkf.predict(now_s)
+        if estimate is None:
+            self.dkf_yaw_error_rad = None
+            self.dkf_pitch_error_rad = None
+            self.dkf_yaw_rate_rad_s = None
+            self.dkf_pitch_rate_rad_s = None
+            self.dkf_prediction_horizon_s = None
+            return
+
+        (
+            self.dkf_yaw_error_rad,
+            self.dkf_pitch_error_rad,
+            self.dkf_yaw_rate_rad_s,
+            self.dkf_pitch_rate_rad_s,
+            self.dkf_prediction_horizon_s,
+        ) = estimate
+
+    def _reset_image_error_dkf(self) -> None:
+        self.image_error_dkf.reset()
+        self.dkf_yaw_error_rad = None
+        self.dkf_pitch_error_rad = None
+        self.dkf_yaw_rate_rad_s = None
+        self.dkf_pitch_rate_rad_s = None
+        self.dkf_prediction_horizon_s = None
+        self.dkf_last_measurement_time_s = None
+        self.dkf_last_source_stamp_s = None
+        self.dkf_source_stamp_offset_s = None
+        self.dkf_measurement_time_source = "none"
+        self.dkf_measurement_delay_observed_s = None
 
     def _visual_png_velocity_setpoint(self, los_ned: Vector3, dt_s: float) -> Vector3:
         los_vertical_rad, los_horizontal_rad = ned_direction_angles(los_ned)
@@ -1156,7 +1459,14 @@ class VisualPursuitInterceptor(Node):
         status.hardware_id = f"target_system={self.target_system}"
         status.level = DiagnosticStatus.OK if pursuing else DiagnosticStatus.WARN
         status.message = self.state
+        now_s = now_us * 1e-6
         current_velocity_ned = self._current_velocity_ned()
+        visual_error_fresh = self._fresh_visual_error(now_s)
+        dkf_ready = (
+            visual_error_fresh
+            and self.dkf_yaw_error_rad is not None
+            and self.dkf_pitch_error_rad is not None
+        )
         status.values = [
             diagnostic_value("state", self.state),
             diagnostic_value("pursuing", pursuing),
@@ -1178,11 +1488,11 @@ class VisualPursuitInterceptor(Node):
             diagnostic_value("gimbal_search_active", self.gimbal_search_active),
             diagnostic_value(
                 "gimbal_search_active_age_s",
-                self._gimbal_search_active_age_s(now_us * 1e-6),
+                self._gimbal_search_active_age_s(now_s),
             ),
             diagnostic_value(
                 "vertical_search_active",
-                self._vertical_search_active(now_us * 1e-6),
+                self._vertical_search_active(now_s),
             ),
             diagnostic_value(
                 "vertical_search_center_z_ned",
@@ -1198,20 +1508,20 @@ class VisualPursuitInterceptor(Node):
             ),
             diagnostic_value(
                 "detection_true_duration_s",
-                self._detection_true_duration_s(now_us * 1e-6),
+                self._detection_true_duration_s(now_s),
             ),
             diagnostic_value(
                 "lock_true_duration_s",
-                self._lock_true_duration_s(now_us * 1e-6),
+                self._lock_true_duration_s(now_s),
             ),
             diagnostic_value(
                 "detection_loss_age_s",
-                self._detection_loss_age_s(now_us * 1e-6),
+                self._detection_loss_age_s(now_s),
             ),
             diagnostic_value("lock_loss_grace_s", self.lock_loss_grace_s),
             diagnostic_value(
                 "lock_loss_age_s",
-                self._lock_loss_age_s(now_us * 1e-6),
+                self._lock_loss_age_s(now_s),
             ),
             diagnostic_value("png_vertical_gain", self.png_vertical_gain),
             diagnostic_value("png_horizontal_gain", self.png_horizontal_gain),
@@ -1219,16 +1529,51 @@ class VisualPursuitInterceptor(Node):
                 "commanded_closing_speed_mps",
                 self.last_commanded_closing_speed_mps,
             ),
+            diagnostic_value("visual_error_fresh", visual_error_fresh),
             diagnostic_value(
-                "visual_error_fresh",
-                self._fresh_visual_error(now_us * 1e-6),
+                "image_yaw_error_deg",
+                degrees_or_none(self.image_yaw_error_rad),
             ),
-            diagnostic_value("image_yaw_error_deg", degrees_or_none(self.image_yaw_error_rad)),
-            diagnostic_value("image_pitch_error_deg", degrees_or_none(self.image_pitch_error_rad)),
+            diagnostic_value(
+                "image_pitch_error_deg",
+                degrees_or_none(self.image_pitch_error_rad),
+            ),
             diagnostic_value("image_error_score", self.image_error_score),
             diagnostic_value(
                 "visual_error_age_s",
-                self._visual_error_age_s(now_us * 1e-6),
+                self._visual_error_age_s(now_s),
+            ),
+            diagnostic_value("dkf_enabled", self.dkf_enabled),
+            diagnostic_value("dkf_ready", dkf_ready),
+            diagnostic_value("dkf_measurement_delay_s", self.dkf_measurement_delay_s),
+            diagnostic_value(
+                "dkf_measurement_time_source",
+                self.dkf_measurement_time_source,
+            ),
+            diagnostic_value(
+                "dkf_measurement_delay_observed_s",
+                self.dkf_measurement_delay_observed_s,
+            ),
+            diagnostic_value("dkf_source_stamp_s", self.dkf_last_source_stamp_s),
+            diagnostic_value(
+                "dkf_prediction_horizon_s",
+                self.dkf_prediction_horizon_s,
+            ),
+            diagnostic_value(
+                "dkf_yaw_error_deg",
+                degrees_or_none(self.dkf_yaw_error_rad),
+            ),
+            diagnostic_value(
+                "dkf_pitch_error_deg",
+                degrees_or_none(self.dkf_pitch_error_rad),
+            ),
+            diagnostic_value(
+                "dkf_yaw_rate_deg_s",
+                degrees_or_none(self.dkf_yaw_rate_rad_s),
+            ),
+            diagnostic_value(
+                "dkf_pitch_rate_deg_s",
+                degrees_or_none(self.dkf_pitch_rate_rad_s),
             ),
             diagnostic_value("closing_speed_mps", self.last_closing_speed_mps),
             diagnostic_value("gimbal_yaw_deg", degrees_or_none(self.gimbal_yaw_rad)),
@@ -1633,6 +1978,12 @@ def degrees_or_none(value: float | None) -> float | None:
 
 def point_value(point: tuple[float, float, float] | None, index: int) -> float | None:
     return None if point is None else point[index]
+
+
+def stamp_to_seconds(sec: int, nanosec: int) -> float | None:
+    if int(sec) == 0 and int(nanosec) == 0:
+        return None
+    return float(sec) + float(nanosec) * 1e-9
 
 
 def diagnostic_value(key: str, value: bool | float | str | None) -> KeyValue:

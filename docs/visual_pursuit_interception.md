@@ -86,17 +86,40 @@ TrajectorySetpoint.velocity = [vx, vy, vz]
 云台节点发布 `/x500_0/gimbal_target_tracker/error`，其中：
 
 ```text
-vector.x = yaw image angular error, deg
-vector.y = pitch image angular error, deg
+vector.x = raw yaw image angular error, deg
+vector.y = raw pitch image angular error, deg
 vector.z = target score
+header.stamp = selected detection/image source time when available
 ```
 
-拦截器先把图像残余角按 `visual_error_yaw_sign` 和
-`visual_error_pitch_sign` 转成 Gazebo/PX4 使用的相机射线符号，再变成相机传感器坐标下的目标射线：
+云台控制内部仍可对角误差使用死区；但外发给拦截器的是原始图像角测量，便于 DKF 估计连续残余角。
+
+## DKF 延迟补偿
+
+拦截器先把原始图像角按 `visual_error_yaw_sign` 和
+`visual_error_pitch_sign` 转成 Gazebo/PX4 使用的相机射线符号。DKF 只作用在转换后的 signed 图像残余角前端，不替换 PX4 姿态/推力内环。当前状态量为：
 
 ```text
-signed_yaw_error   = visual_error_yaw_sign * yaw_error
-signed_pitch_error = visual_error_pitch_sign * pitch_error
+x = [yaw_error, pitch_error, yaw_error_rate, pitch_error_rate]
+```
+
+`gimbal_target_tracker` 会把选中检测的源时间戳写入 `/error.header.stamp`。每次收到视觉误差时，DKF 优先使用该 header stamp 作为测量时刻，然后预测到当前控制时刻。同一个检测帧被云台 tracker 多次发布时，只对 DKF 做一次测量更新，后续只预测，避免重复压低协方差。
+
+Gazebo 图像 stamp 通常是仿真时间，而 PX4 Offboard 节点的时钟通常是系统/XRCE 同步时间。两者不在同一绝对时间域时，拦截器会为源 stamp 建立稳定 offset 映射，诊断中显示为 `dkf_measurement_time_source=header_mapped`。这仍然使用图像 stamp 的相对时间推进 DKF，只是不把 Gazebo 仿真秒数直接当作 PX4/ROS 控制时钟秒数。
+
+如果 header stamp 为空，或者映射后的测量时刻仍不可用，则回退到：
+
+```text
+measurement_time = now - dkf_measurement_delay_s
+```
+
+后续 LOS 和 PNG 使用预测后的 `dkf_yaw_error` / `dkf_pitch_error`；如果 DKF 未就绪，则回退到最新 signed 图像误差。
+
+DKF 输出再变成相机传感器坐标下的目标射线：
+
+```text
+signed_yaw_error   = DKF(visual_error_yaw_sign * yaw_error)
+signed_pitch_error = DKF(visual_error_pitch_sign * pitch_error)
 ray_sensor = normalize([1, tan(signed_yaw_error), tan(signed_pitch_error)])
 ```
 
@@ -170,6 +193,11 @@ png_vertical_gain: 3.5
 png_horizontal_gain: 3.5
 max_guidance_accel_mps2: 2.0
 visual_error_timeout_s: 0.2
+dkf_enabled: true
+dkf_measurement_delay_s: 0.05
+dkf_measurement_noise_std_rad: 0.017453292519943295
+dkf_process_noise_std_rad_s2: 4.0
+dkf_max_prediction_s: 0.2
 
 lock_loss_grace_s: 0.4
 coast_velocity_decay_s: 0.5
@@ -197,6 +225,14 @@ ros2 topic echo /x500_0/visual_pursuit_interceptor/diagnostics --once
 - `visual_error_fresh`
 - `image_yaw_error_deg`
 - `image_pitch_error_deg`
+- `dkf_ready`
+- `dkf_measurement_time_source`
+- `dkf_measurement_delay_observed_s`
+- `dkf_source_stamp_s`
+- `dkf_yaw_error_deg`
+- `dkf_pitch_error_deg`
+- `dkf_yaw_rate_deg_s`
+- `dkf_pitch_rate_deg_s`
 - `visual_los_ned_*`
 - `png_los_vertical_angle_deg`
 - `png_los_horizontal_angle_deg`

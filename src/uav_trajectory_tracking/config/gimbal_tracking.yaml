@@ -76,7 +76,6 @@ gimbal_target_tracker:
     gimbal_pitch_joint_name: cgo3_camera_joint
     # Keep the camera line of sight stabilized independently of vehicle motion.
     # earth_lock locks roll, pitch, and yaw in the PX4 gimbal manager frame.
-    # body_follow is available only as a non-stabilized fallback.
     stabilization_mode: earth_lock
     # Use the high-rate PX4 gimbal manager setpoint topic for continuous servoing.
     # vehicle_command remains available as a compatibility fallback.

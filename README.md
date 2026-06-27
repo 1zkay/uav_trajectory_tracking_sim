@@ -193,7 +193,7 @@ ENABLE_GIMBAL_TRACKING=true ./scripts/start_trajectory_tracking.sh
 
 云台节点同时发布两类状态：`tracking_active` 表示有新鲜目标检测/跟踪，`lock_active` 表示目标已经居中且残差稳定，外层导引可以使用。`lock_active` 由 yaw/pitch 图像误差、残差角速度、云台滞后状态和进入/退出滞回共同决定。
 
-视觉拦截节点 `visual_pursuit_interceptor` 只在 `lock_active` 和云台图像误差新鲜时进入 `pursuit`。节点用云台关节角和 `/x500_0/gimbal_target_tracker/error` 构造视觉 LOS，按《Precise Interception Flight Targets by Image-based Visual Servoing of Multicopter》的 PNG 速度角更新生成 PX4 NED velocity/acceleration setpoint。详细说明见 `docs/visual_pursuit_interception.md`。
+视觉拦截节点 `visual_pursuit_interceptor` 只在 `lock_active` 和云台图像误差新鲜时进入 `pursuit`。节点对 `/x500_0/gimbal_target_tracker/error` 做 DKF 延迟补偿，再用云台关节角构造视觉 LOS，按《Precise Interception Flight Targets by Image-based Visual Servoing of Multicopter》的 PNG 速度角更新生成 PX4 NED velocity/acceleration setpoint。详细说明见 `docs/visual_pursuit_interception.md`。
 
 查看带 BoT-SORT 跟踪标签的相机窗口时，`rqt_image_view` 终端不要激活 `/home/zk/px4-venv`，
 否则可能找不到系统 PyQt5：
@@ -219,7 +219,7 @@ source install/setup.bash
 
 - `src/uav_trajectory_tracking/config/yolo_tracking.yaml`: YOLO/BoT-SORT 参数，例如 `tracker_config`、`confidence_threshold`、`iou_threshold`、`image_size`、`max_inference_hz`、`classes`、`device`。
 - `src/uav_trajectory_tracking/config/gimbal_tracking.yaml`: 云台视觉伺服参数，例如 `target_class_id`、`target_track_id`、`lock_target_track`、`min_score`、`fallback_fx_px`、`fallback_fy_px`、`deadband_angle_deg`、`yaw_kp_s_inv`、`pitch_kp_s_inv`、`lock_yaw_error_deg`、`unlock_yaw_error_deg`、`lock_residual_error_rate_deg_s`、`unlock_residual_error_rate_deg_s`、`search_enabled`、`search_yaw_rate_deg_s`、`search_active_topic`、`command_interface`、`gimbal_yaw_joint_name`、`gimbal_pitch_joint_name`。
-- `src/uav_trajectory_tracking/config/visual_interception.yaml`: 视觉拦截参数，例如 `png_vertical_gain`、`png_horizontal_gain`、`pursuit_speed_mps`、`max_guidance_accel_mps2`、`visual_error_timeout_s`、`lock_loss_grace_s`、`coast_velocity_decay_s`、`search_vertical_motion_enabled`、`search_vertical_amplitude_m`、`yaw_mode` 和相机/云台光轴运动学常量。
+- `src/uav_trajectory_tracking/config/visual_interception.yaml`: 视觉拦截参数，例如 `png_vertical_gain`、`png_horizontal_gain`、`pursuit_speed_mps`、`max_guidance_accel_mps2`、`visual_error_timeout_s`、`dkf_measurement_delay_s`、`lock_loss_grace_s`、`coast_velocity_decay_s`、`search_vertical_motion_enabled`、`search_vertical_amplitude_m`、`yaw_mode` 和相机/云台光轴运动学常量。
 
 ## 风场
 
@@ -348,14 +348,14 @@ PUBLISH_STATE_COMPARE_TOPICS=false ./scripts/start_visual_interception.sh
 - `/x500_0/yolo/tracks`: YOLO + BoT-SORT 跟踪框，类型为 `vision_msgs/Detection2DArray`，其中 `Detection2D.id` 是跨帧 track id。
 - `/x500_0/yolo/tracks_image`: YOLO + BoT-SORT 标注后的图像。
 - `/x500_0/gimbal/joint_states`: Gazebo 云台关节反馈，`gimbal_target_tracker` 用它计算 `actual_yaw/actual_pitch`。
-- `/x500_0/gimbal_target_tracker/error`: 云台视觉伺服视线角误差，`vector.x/y` 分别为 yaw/pitch 角误差，单位为 degree。
+- `/x500_0/gimbal_target_tracker/error`: 原始图像视线角误差，`vector.x/y` 分别为 yaw/pitch 角误差，单位为 degree；`header.stamp` 优先为选中检测的图像源时间戳，云台控制内部仍可使用死区。
 - `/x500_0/gimbal_target_tracker/residual_error_rate`: 云台残余图像误差角速度，`x/y` 为 yaw/pitch 残差角速度，单位为 degree/s，`z` 为 `0..1` 锁定质量。
 - `/x500_0/gimbal_target_tracker/tracking_active`: 云台节点是否收到新鲜目标跟踪结果。
 - `/x500_0/gimbal_target_tracker/lock_active`: 目标是否居中且稳定到足以作为外层导引门控。
 - `/x500_0/gimbal_target_tracker/search_active`: 云台节点是否正在执行 `local_search` 或 `global_search`，视觉拦截节点用它触发无人机垂直搜索。
 - `/x500_0/gimbal_target_tracker/state`: 云台控制诊断，包含状态机状态、`cmd_yaw/cmd_pitch`、`actual_yaw/actual_pitch`、锁定阈值、残差角速度、积分项、反馈年龄和搜索状态。
 - `/fmu/in/gimbal_manager_set_attitude`: 云台高频姿态 setpoint，类型为 `px4_msgs/msg/GimbalManagerSetAttitude`。
-- `/x500_0/visual_pursuit_interceptor/diagnostics`: 视觉拦截诊断，包含 `state`、`pursuing`、`velocity_control_active`、`visual_error_fresh`、`closing_speed_mps`、`visual_los_ned_*`、`los_rate_*`、云台搜索/垂直搜索状态和输出速度。
+- `/x500_0/visual_pursuit_interceptor/diagnostics`: 视觉拦截诊断，包含 `state`、`pursuing`、`velocity_control_active`、`visual_error_fresh`、`dkf_*`、`closing_speed_mps`、`visual_los_ned_*`、`los_rate_*`、云台搜索/垂直搜索状态和输出速度。
 - `/target/trajectory_markers`: 目标无人机轨迹可视化。
 - `/target/trajectory_path`: 目标无人机规划路径。
 - `/target/vehicle_path`: 目标无人机实际轨迹。
