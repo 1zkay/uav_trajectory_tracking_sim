@@ -1,6 +1,6 @@
 # UAV Trajectory Tracking Simulation
 
-PX4 SITL + Gazebo Harmonic + ROS 2 Jazzy 的本地 NED 参数化轨迹跟踪仿真工作区。当前视觉链路采用 **YOLO + BoT-SORT 目标跟踪**，云台节点负责把目标稳定到主机 `x500_0` 的相机中心；视觉拦截链路进一步使用 Gazebo truth 相对位置/速度做 LOS-rate 比例导引，云台锁定只作为导引头可用性门控。
+PX4 SITL + Gazebo Harmonic + ROS 2 Jazzy 的本地 NED 参数化轨迹跟踪仿真工作区。当前视觉链路采用 **YOLO + BoT-SORT 目标跟踪**，云台节点负责把目标稳定到主机 `x500_0` 的相机中心；视觉拦截链路使用云台相机 LOS 和论文式 PNG 速度角更新做外层导引。
 
 ## 环境
 
@@ -56,7 +56,7 @@ cd /home/zk/uav_trajectory_tracking_sim
 ./scripts/start_target_trajectory_tracking.sh
 ```
 
-终端 5，启动主机视觉拦截链路。该入口会启动相机桥接、YOLO + BoT-SORT、云台视觉伺服、Gazebo truth odometry bridge 和 `visual_pursuit_interceptor`：
+终端 5，启动主机视觉拦截链路。该入口会启动相机桥接、YOLO + BoT-SORT、云台视觉伺服、主机 Gazebo truth 日志桥接和 `visual_pursuit_interceptor`：
 
 ```bash
 cd /home/zk/uav_trajectory_tracking_sim
@@ -193,7 +193,7 @@ ENABLE_GIMBAL_TRACKING=true ./scripts/start_trajectory_tracking.sh
 
 云台节点同时发布两类状态：`tracking_active` 表示有新鲜目标检测/跟踪，`lock_active` 表示目标已经居中且残差稳定，外层导引可以使用。`lock_active` 由 yaw/pitch 图像误差、残差角速度、云台滞后状态和进入/退出滞回共同决定。
 
-视觉拦截节点 `visual_pursuit_interceptor` 只在 `lock_active` 新鲜时进入 `pursuit`。当前仿真导引不再使用云台光轴作为相对几何，而是订阅 Gazebo truth odometry，计算真实相对位置、相对速度、LOS、LOS rate 和闭合速度，然后发布 PX4 NED velocity setpoint。云台光轴仍会显式计算并用于诊断 `gimbal_truth_los_error_deg`，用于判断云台导引头是否真的对准目标。详细说明见 `docs/visual_pursuit_interception.md`。
+视觉拦截节点 `visual_pursuit_interceptor` 只在 `lock_active` 和云台图像误差新鲜时进入 `pursuit`。节点用云台关节角和 `/x500_0/gimbal_target_tracker/error` 构造视觉 LOS，按《Precise Interception Flight Targets by Image-based Visual Servoing of Multicopter》的 PNG 速度角更新生成 PX4 NED velocity/acceleration setpoint。详细说明见 `docs/visual_pursuit_interception.md`。
 
 查看带 BoT-SORT 跟踪标签的相机窗口时，`rqt_image_view` 终端不要激活 `/home/zk/px4-venv`，
 否则可能找不到系统 PyQt5：
@@ -219,7 +219,7 @@ source install/setup.bash
 
 - `src/uav_trajectory_tracking/config/yolo_tracking.yaml`: YOLO/BoT-SORT 参数，例如 `tracker_config`、`confidence_threshold`、`iou_threshold`、`image_size`、`max_inference_hz`、`classes`、`device`。
 - `src/uav_trajectory_tracking/config/gimbal_tracking.yaml`: 云台视觉伺服参数，例如 `target_class_id`、`target_track_id`、`lock_target_track`、`min_score`、`fallback_fx_px`、`fallback_fy_px`、`deadband_angle_deg`、`yaw_kp_s_inv`、`pitch_kp_s_inv`、`lock_yaw_error_deg`、`unlock_yaw_error_deg`、`lock_residual_error_rate_deg_s`、`unlock_residual_error_rate_deg_s`、`search_enabled`、`search_yaw_rate_deg_s`、`search_active_topic`、`command_interface`、`gimbal_yaw_joint_name`、`gimbal_pitch_joint_name`。
-- `src/uav_trajectory_tracking/config/visual_interception.yaml`: 视觉拦截参数，例如 `truth_guidance_enabled`、`truth_guidance_required`、`pursuit_speed_mps`、`navigation_gain`、`max_guidance_accel_mps2`、`lock_loss_grace_s`、`coast_velocity_decay_s`、`search_vertical_motion_enabled`、`search_vertical_amplitude_m`、`yaw_mode` 和相机/云台光轴运动学常量。
+- `src/uav_trajectory_tracking/config/visual_interception.yaml`: 视觉拦截参数，例如 `png_vertical_gain`、`png_horizontal_gain`、`pursuit_speed_mps`、`max_guidance_accel_mps2`、`visual_error_timeout_s`、`lock_loss_grace_s`、`coast_velocity_decay_s`、`search_vertical_motion_enabled`、`search_vertical_amplitude_m`、`yaw_mode` 和相机/云台光轴运动学常量。
 
 ## 风场
 
@@ -339,7 +339,6 @@ PUBLISH_STATE_COMPARE_TOPICS=false ./scripts/start_visual_interception.sh
 - `/px4_1/fmu/out/vehicle_local_position_v1`: 目标机 PX4 EKF 本地位置/速度/加速度估计。
 - `/px4_1/fmu/out/vehicle_attitude`: 目标机 PX4 姿态估计。
 - `/px4_1/fmu/out/vehicle_odometry`: 目标机 PX4 里程计估计。
-- `/model/x500_1/odometry_with_covariance`: 目标机 Gazebo truth odometry，视觉拦截导引用它计算真实相对位置/速度。
 - `/trajectory_markers`: 轨迹起点、终点和当前飞行位置。
 - `/trajectory_path`: YAML 参数化曲线采样得到的规划轨迹。
 - `/vehicle_path`: 飞行过程中累积的实际轨迹。
@@ -356,7 +355,7 @@ PUBLISH_STATE_COMPARE_TOPICS=false ./scripts/start_visual_interception.sh
 - `/x500_0/gimbal_target_tracker/search_active`: 云台节点是否正在执行 `local_search` 或 `global_search`，视觉拦截节点用它触发无人机垂直搜索。
 - `/x500_0/gimbal_target_tracker/state`: 云台控制诊断，包含状态机状态、`cmd_yaw/cmd_pitch`、`actual_yaw/actual_pitch`、锁定阈值、残差角速度、积分项、反馈年龄和搜索状态。
 - `/fmu/in/gimbal_manager_set_attitude`: 云台高频姿态 setpoint，类型为 `px4_msgs/msg/GimbalManagerSetAttitude`。
-- `/x500_0/visual_pursuit_interceptor/diagnostics`: 视觉拦截诊断，包含 `state`、`pursuing`、`velocity_control_active`、真实 `range_m`、`closing_speed_mps`、`relative_*`、`los_rate_*`、`gimbal_truth_los_error_deg`、云台搜索/垂直搜索状态和输出速度。
+- `/x500_0/visual_pursuit_interceptor/diagnostics`: 视觉拦截诊断，包含 `state`、`pursuing`、`velocity_control_active`、`visual_error_fresh`、`closing_speed_mps`、`visual_los_ned_*`、`los_rate_*`、云台搜索/垂直搜索状态和输出速度。
 - `/target/trajectory_markers`: 目标无人机轨迹可视化。
 - `/target/trajectory_path`: 目标无人机规划路径。
 - `/target/vehicle_path`: 目标无人机实际轨迹。
@@ -413,15 +412,14 @@ ros2 topic echo /fmu/in/gimbal_manager_set_attitude --once
 
 ```bash
 ros2 topic echo /x500_0/gimbal_target_tracker/lock_active --once
-ros2 topic echo /model/x500_0/odometry_with_covariance --once
-ros2 topic echo /model/x500_1/odometry_with_covariance --once
+ros2 topic echo /x500_0/gimbal_target_tracker/error --once
 ros2 topic echo /x500_0/visual_pursuit_interceptor/diagnostics --once
 ```
 
 并确认：
 
-- `start_visual_interception.sh` 已启动，或 `visual_interception.launch.py` 的 `enable_truth_odometry_bridge:=true`。
-- `visual_interception.yaml` 中 `truth_guidance_required: true` 时，两个 truth odometry 话题都必须新鲜，否则节点不会进入 `pursuit`。
+- `start_visual_interception.sh` 已启动，且 `GIMBAL_ERROR_TOPIC` 与云台节点的 `error_topic` 一致。
+- `visual_interception.yaml` 中 `/x500_0/gimbal_target_tracker/error` 必须新鲜；诊断里的 `visual_error_fresh` 应为 `true`。
 - `lock_active=false` 时先看 `/x500_0/gimbal_target_tracker/state` 里的 `last_image_yaw_error_deg`、`last_image_pitch_error_deg`、`lock_centered` 和 `lock_residual_rate_ok`。
 - 短暂掉锁时状态应进入 `coast_on_lock_loss`，继续发布 velocity setpoint 衰减速度；只有长时间丢锁才切 position hold。
 

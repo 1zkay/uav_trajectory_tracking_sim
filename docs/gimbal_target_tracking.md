@@ -402,7 +402,7 @@ ros2 topic echo /x500_0/gimbal_target_tracker/state --once
 
 云台节点本身是基于图像误差的二维视觉伺服，不估计目标三维位置，也不预测目标运动。BoT-SORT 可以提升跨帧目标连续性，但它仍依赖 YOLO 检测结果；当目标长时间遮挡、过小或置信度过低时，track id 可能丢失，并在释放锁定后重新捕获。
 
-当前 `visual_pursuit_interceptor` 已经在仿真层使用 Gazebo truth 相对位置/速度做外层导引；如果后续要把云台节点升级为真实视觉导引头，可以进一步增加：
+当前 `visual_pursuit_interceptor` 默认使用云台关节反馈和本节点的 `/x500_0/gimbal_target_tracker/error` 构造视觉 LOS，并按论文式 PNG 速度角更新做外层导引。云台节点仍然不估计目标距离或目标运动；如果后续要增强真实视觉导引头，可以进一步增加：
 
 - 单目/多目或融合滤波的目标相对方位、距离和速度估计；
 - 图像测量噪声、遮挡和 ID 切换的滤波；

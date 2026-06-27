@@ -75,14 +75,13 @@ TRAJECTORY_FILE=/home/zk/my_target_trajectory.yaml ./scripts/start_target_trajec
 ./scripts/start_visual_interception.sh
 ```
 
-它会启动相机桥接、YOLO + BoT-SORT、云台视觉伺服、truth odometry bridge 和 `visual_pursuit_interceptor`。视觉拦截时不要同时运行主机 `start_trajectory_tracking.sh`，否则两个节点会同时向 `/fmu/in/trajectory_setpoint` 发布 setpoint。启动后检查：
+它会启动相机桥接、YOLO + BoT-SORT、云台视觉伺服、主机 truth 日志桥接和 `visual_pursuit_interceptor`。视觉拦截时不要同时运行主机 `start_trajectory_tracking.sh`，否则两个节点会同时向 `/fmu/in/trajectory_setpoint` 发布 setpoint。启动后检查：
 
 ```bash
-ros2 topic list | rg 'gimbal_target_tracker|visual_pursuit|odometry_with_covariance'
+ros2 topic list | rg 'gimbal_target_tracker|visual_pursuit'
 ros2 topic echo /x500_0/gimbal_target_tracker/tracking_active --once
 ros2 topic echo /x500_0/gimbal_target_tracker/lock_active --once
-ros2 topic echo /model/x500_0/odometry_with_covariance --once
-ros2 topic echo /model/x500_1/odometry_with_covariance --once
+ros2 topic echo /x500_0/gimbal_target_tracker/error --once
 ros2 topic echo /x500_0/visual_pursuit_interceptor/diagnostics --once
 ```
 
@@ -93,11 +92,10 @@ state: pursuit
 pursuing: true
 velocity_control_active: true
 lock_active: true
-truth_feedback_fresh: true
-range_m: finite
+visual_error_fresh: true
 ```
 
-短暂掉锁时应进入 `coast_on_lock_loss` 并继续 velocity control；如果直接 `target_lost` 或 position hold，优先检查 `lock_loss_grace_s`、truth odometry 是否新鲜，以及云台端 `lock_active` 是否在阈值边缘抖动。
+短暂掉锁时应进入 `coast_on_lock_loss` 并继续 velocity control；如果直接 `target_lost` 或 position hold，优先检查 `lock_loss_grace_s`、`/x500_0/gimbal_target_tracker/error` 是否新鲜，以及云台端 `lock_active` 是否在阈值边缘抖动。
 
 ## 常见问题
 

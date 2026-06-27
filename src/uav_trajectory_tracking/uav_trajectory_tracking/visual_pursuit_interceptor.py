@@ -10,7 +10,7 @@ import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Vector3Stamped
 from px4_msgs.msg import (
     OffboardControlMode,
     TrajectorySetpoint,
@@ -55,25 +55,8 @@ class GimbalCameraKinematics:
     optical_axis_sensor: Vector3
 
 
-@dataclass(frozen=True)
-class TruthState:
-    position_ned: Vector3
-    velocity_ned: Vector3
-    stamp_s: float
-
-
-@dataclass(frozen=True)
-class RelativeTruth:
-    position_ned: Vector3
-    velocity_ned: Vector3
-    target_velocity_ned: Vector3
-    range_m: float
-    los_ned: Vector3
-    closing_speed_mps: float
-
-
 class VisualPursuitInterceptor(Node):
-    """Intercept using gimbal lock as seeker input and PN-style guidance."""
+    """Intercept using gimbal lock as seeker input and image-based PNG guidance."""
 
     def __init__(self) -> None:
         super().__init__("visual_pursuit_interceptor")
@@ -82,9 +65,8 @@ class VisualPursuitInterceptor(Node):
         self.declare_parameter("vehicle_status_topic", "/fmu/out/vehicle_status_v4")
         self.declare_parameter("vehicle_local_position_topic", "/fmu/out/vehicle_local_position_v1")
         self.declare_parameter("vehicle_attitude_topic", "/fmu/out/vehicle_attitude")
-        self.declare_parameter("host_truth_odometry_topic", "/model/x500_0/odometry_with_covariance")
-        self.declare_parameter("target_truth_odometry_topic", "/model/x500_1/odometry_with_covariance")
         self.declare_parameter("gimbal_joint_state_topic", "/x500_0/gimbal/joint_states")
+        self.declare_parameter("gimbal_error_topic", "/x500_0/gimbal_target_tracker/error")
         self.declare_parameter(
             "gimbal_search_active_topic",
             "/x500_0/gimbal_target_tracker/search_active",
@@ -125,26 +107,35 @@ class VisualPursuitInterceptor(Node):
             config.get("max_pursuit_accel_mps2", 1.0),
             "max_pursuit_accel_mps2",
         )
-        self.navigation_gain = positive_float(
-            config.get("navigation_gain", 3.0),
-            "navigation_gain",
-        )
         self.max_guidance_accel_mps2 = nonnegative_float(
             config.get("max_guidance_accel_mps2", self.max_pursuit_accel_mps2),
             "max_guidance_accel_mps2",
+        )
+        self.png_vertical_gain = positive_float(
+            config.get("png_vertical_gain", 3.5),
+            "png_vertical_gain",
+        )
+        self.png_horizontal_gain = positive_float(
+            config.get("png_horizontal_gain", 3.5),
+            "png_horizontal_gain",
+        )
+        self.visual_error_timeout_s = positive_float(
+            config.get(
+                "visual_error_timeout_s",
+                config.get("tracking_active_timeout_s", 0.5),
+            ),
+            "visual_error_timeout_s",
+        )
+        self.visual_error_yaw_sign = float(config.get("visual_error_yaw_sign", 1.0))
+        self.visual_error_pitch_sign = float(config.get("visual_error_pitch_sign", 1.0))
+        self.min_velocity_direction_mps = nonnegative_float(
+            config.get("min_velocity_direction_mps", 0.2),
+            "min_velocity_direction_mps",
         )
         self.los_rate_filter_alpha = clamp(
             float(config.get("los_rate_filter_alpha", 0.35)),
             0.0,
             1.0,
-        )
-        self.truth_guidance_enabled = bool(config.get("truth_guidance_enabled", True))
-        self.truth_guidance_required = bool(
-            config.get("truth_guidance_required", self.truth_guidance_enabled)
-        )
-        self.truth_odometry_timeout_s = positive_float(
-            config.get("truth_odometry_timeout_s", 0.5),
-            "truth_odometry_timeout_s",
         )
         self.coast_velocity_decay_s = positive_float(
             config.get("coast_velocity_decay_s", 0.6),
@@ -241,8 +232,6 @@ class VisualPursuitInterceptor(Node):
         self.vehicle_status: VehicleStatus | None = None
         self.vehicle_local_position: VehicleLocalPosition | None = None
         self.vehicle_attitude: VehicleAttitude | None = None
-        self.host_truth_state: TruthState | None = None
-        self.target_truth_state: TruthState | None = None
         self.tracking_active = False
         self.last_tracking_active_time_s: float | None = None
         self.tracking_true_since_s: float | None = None
@@ -257,6 +246,10 @@ class VisualPursuitInterceptor(Node):
         self.gimbal_pitch_rad: float | None = None
         self.gimbal_roll_rad: float | None = None
         self.last_gimbal_feedback_time_s: float | None = None
+        self.image_yaw_error_rad: float | None = None
+        self.image_pitch_error_rad: float | None = None
+        self.image_error_score: float | None = None
+        self.last_visual_error_time_s: float | None = None
         self.takeoff_position: tuple[float, float, float] | None = None
         self.takeoff_altitude_reached = False
         self.hold_position: tuple[float, float, float] | None = None
@@ -269,16 +262,20 @@ class VisualPursuitInterceptor(Node):
         self.last_los_body = (1.0, 0.0, 0.0)
         self.last_los_ned = (1.0, 0.0, 0.0)
         self.last_gimbal_los_ned = (1.0, 0.0, 0.0)
-        self.last_truth_los_ned: Vector3 | None = None
-        self.last_relative_position_ned: Vector3 | None = None
-        self.last_relative_velocity_ned: Vector3 | None = None
-        self.last_range_m: float | None = None
+        self.last_visual_los_body = (1.0, 0.0, 0.0)
+        self.last_visual_los_ned = (1.0, 0.0, 0.0)
         self.last_closing_speed_mps: float | None = None
         self.last_commanded_closing_speed_mps = 0.0
         self.last_guidance_los_ned: Vector3 | None = None
         self.last_los_rate_ned = (0.0, 0.0, 0.0)
         self.last_guidance_accel_ned = (0.0, 0.0, 0.0)
         self.last_velocity_setpoint_ned = (0.0, 0.0, 0.0)
+        self.last_png_los_vertical_angle_rad: float | None = None
+        self.last_png_los_horizontal_angle_rad: float | None = None
+        self.last_png_velocity_vertical_angle_rad: float | None = None
+        self.last_png_velocity_horizontal_angle_rad: float | None = None
+        self.last_png_desired_vertical_angle_rad: float | None = None
+        self.last_png_desired_horizontal_angle_rad: float | None = None
         self.last_control_time_s: float | None = None
         self.vertical_search_start_time_s: float | None = None
         self.vertical_search_center_z_ned: float | None = None
@@ -337,21 +334,15 @@ class VisualPursuitInterceptor(Node):
             px4_qos,
         )
         self.create_subscription(
-            Odometry,
-            str(self.get_parameter("host_truth_odometry_topic").value),
-            self._host_truth_odometry_callback,
-            sensor_qos,
-        )
-        self.create_subscription(
-            Odometry,
-            str(self.get_parameter("target_truth_odometry_topic").value),
-            self._target_truth_odometry_callback,
-            sensor_qos,
-        )
-        self.create_subscription(
             JointState,
             str(self.get_parameter("gimbal_joint_state_topic").value),
             self._gimbal_joint_state_callback,
+            sensor_qos,
+        )
+        self.create_subscription(
+            Vector3Stamped,
+            str(self.get_parameter("gimbal_error_topic").value),
+            self._gimbal_error_callback,
             sensor_qos,
         )
         self.create_subscription(
@@ -385,8 +376,7 @@ class VisualPursuitInterceptor(Node):
             f"{self.initial_hover_position[1]:.2f}, "
             f"{self.initial_hover_position[2]:.2f}) m NED, "
             f"closing_speed={self.pursuit_speed_mps:.2f} m/s, "
-            f"nav_gain={self.navigation_gain:.2f}, "
-            f"truth_guidance={self.truth_guidance_enabled}, "
+            f"png_gains=({self.png_vertical_gain:.2f}, {self.png_horizontal_gain:.2f}), "
             f"gimbal_joints=({self.gimbal_yaw_joint_name}, {self.gimbal_pitch_joint_name}), "
             f"roll_joint={self.gimbal_roll_joint_name}, "
             f"vertical_search={self.search_vertical_motion_enabled}, "
@@ -420,11 +410,15 @@ class VisualPursuitInterceptor(Node):
     def _vehicle_attitude_callback(self, msg: VehicleAttitude) -> None:
         self.vehicle_attitude = msg
 
-    def _host_truth_odometry_callback(self, msg: Odometry) -> None:
-        self.host_truth_state = truth_state_from_odometry(msg, self._now_s())
-
-    def _target_truth_odometry_callback(self, msg: Odometry) -> None:
-        self.target_truth_state = truth_state_from_odometry(msg, self._now_s())
+    def _gimbal_error_callback(self, msg: Vector3Stamped) -> None:
+        self.image_yaw_error_rad = math.radians(
+            self.visual_error_yaw_sign * float(msg.vector.x)
+        )
+        self.image_pitch_error_rad = math.radians(
+            self.visual_error_pitch_sign * float(msg.vector.y)
+        )
+        self.image_error_score = float(msg.vector.z)
+        self.last_visual_error_time_s = self._now_s()
 
     def _tracking_active_callback(self, msg: Bool) -> None:
         now_s = self._now_s()
@@ -549,7 +543,7 @@ class VisualPursuitInterceptor(Node):
             self.state = InterceptorState.GIMBAL_SEARCH
             return False
 
-        if self.truth_guidance_required and not self._fresh_truth_feedback(now_s):
+        if not self._fresh_visual_error(now_s):
             if (
                 self.previous_state in GUIDANCE_STATES
                 and self._lock_recently_active(now_s)
@@ -673,15 +667,14 @@ class VisualPursuitInterceptor(Node):
             return False
         return now_s - self.last_gimbal_feedback_time_s <= self.gimbal_feedback_timeout_s
 
-    def _fresh_truth_feedback(self, now_s: float) -> bool:
-        if not self.truth_guidance_enabled:
-            return True
-        if self.host_truth_state is None or self.target_truth_state is None:
+    def _fresh_visual_error(self, now_s: float) -> bool:
+        if (
+            self.image_yaw_error_rad is None
+            or self.image_pitch_error_rad is None
+            or self.last_visual_error_time_s is None
+        ):
             return False
-        return (
-            now_s - self.host_truth_state.stamp_s <= self.truth_odometry_timeout_s
-            and now_s - self.target_truth_state.stamp_s <= self.truth_odometry_timeout_s
-        )
+        return now_s - self.last_visual_error_time_s <= self.visual_error_timeout_s
 
     def _publish_offboard_control_mode(
         self,
@@ -733,41 +726,37 @@ class VisualPursuitInterceptor(Node):
         assert self.gimbal_pitch_rad is not None
         assert self.gimbal_roll_rad is not None
 
-        los_body = gimbal_angles_to_body_los(
+        gimbal_los_body = gimbal_angles_to_body_los(
             self.gimbal_yaw_rad,
             self.gimbal_roll_rad,
             self.gimbal_pitch_rad,
             self.gimbal_kinematics,
         )
-        los_ned = normalize(
+        gimbal_los_ned = normalize(
             rotate_body_to_ned(
                 tuple(float(value) for value in self.vehicle_attitude.q),
-                los_body,
+                gimbal_los_body,
             )
         )
-        self.last_gimbal_los_ned = los_ned
+        self.last_gimbal_los_ned = gimbal_los_ned
 
-        relative_truth = self._relative_truth(now_us * 1e-6)
-        if self.truth_guidance_enabled and relative_truth is not None:
-            guidance_los_ned = relative_truth.los_ned
-            self.last_truth_los_ned = relative_truth.los_ned
-            self.last_relative_position_ned = relative_truth.position_ned
-            self.last_relative_velocity_ned = relative_truth.velocity_ned
-            self.last_range_m = relative_truth.range_m
-            self.last_closing_speed_mps = relative_truth.closing_speed_mps
-        else:
-            guidance_los_ned = los_ned
-            relative_truth = None
-
-        velocity_setpoint_ned = self._pursuit_velocity_setpoint(
-            guidance_los_ned,
-            dt_s,
-            relative_truth,
+        visual_los_body = self._visual_los_body()
+        guidance_los_ned = normalize(
+            rotate_body_to_ned(
+                tuple(float(value) for value in self.vehicle_attitude.q),
+                visual_los_body,
+            )
         )
-        accel_ned = self._proportional_navigation_accel(
+        self.last_visual_los_body = visual_los_body
+        self.last_visual_los_ned = guidance_los_ned
+        self._update_los_rate(guidance_los_ned, dt_s)
+        velocity_setpoint_ned = self._visual_png_velocity_setpoint(
             guidance_los_ned,
             dt_s,
-            relative_truth,
+        )
+        accel_ned = self._velocity_tracking_accel(
+            velocity_setpoint_ned,
+            dt_s,
         )
 
         msg = TrajectorySetpoint()
@@ -790,7 +779,7 @@ class VisualPursuitInterceptor(Node):
                 float(self.vehicle_local_position.y),
                 float(self.vehicle_local_position.z),
             )
-        self.last_los_body = los_body
+        self.last_los_body = visual_los_body
         self.last_los_ned = guidance_los_ned
         self.last_velocity_setpoint_ned = velocity_setpoint_ned
 
@@ -815,84 +804,125 @@ class VisualPursuitInterceptor(Node):
         self.last_commanded_closing_speed_mps = 0.0
         self.last_velocity_setpoint_ned = velocity_setpoint_ned
 
-    def _pursuit_velocity_setpoint(
-        self,
-        los_ned: Vector3,
-        dt_s: float,
-        relative_truth: RelativeTruth | None,
-    ) -> Vector3:
-        closing_speed_mps = self.pursuit_speed_mps
-        self.last_commanded_closing_speed_mps = closing_speed_mps
+    def _visual_los_body(self) -> Vector3:
+        assert self.image_yaw_error_rad is not None
+        assert self.image_pitch_error_rad is not None
+        assert self.gimbal_yaw_rad is not None
+        assert self.gimbal_pitch_rad is not None
+        assert self.gimbal_roll_rad is not None
 
-        velocity_setpoint_ned = scale(los_ned, closing_speed_mps)
-        if relative_truth is not None:
-            velocity_setpoint_ned = add_vectors(
-                relative_truth.target_velocity_ned,
-                velocity_setpoint_ned,
+        return gimbal_image_error_to_body_los(
+            self.gimbal_yaw_rad,
+            self.gimbal_roll_rad,
+            self.gimbal_pitch_rad,
+            self.image_yaw_error_rad,
+            self.image_pitch_error_rad,
+            self.gimbal_kinematics,
+        )
+
+    def _visual_png_velocity_setpoint(self, los_ned: Vector3, dt_s: float) -> Vector3:
+        los_vertical_rad, los_horizontal_rad = ned_direction_angles(los_ned)
+        current_velocity_ned = self._current_velocity_ned()
+        current_speed_mps = vector_norm(current_velocity_ned)
+
+        if current_speed_mps >= self.min_velocity_direction_mps:
+            velocity_vertical_rad, velocity_horizontal_rad = ned_direction_angles(
+                current_velocity_ned
+            )
+        else:
+            velocity_vertical_rad = (
+                self.last_png_velocity_vertical_angle_rad
+                if self.last_png_velocity_vertical_angle_rad is not None
+                else los_vertical_rad
+            )
+            velocity_horizontal_rad = (
+                self.last_png_velocity_horizontal_angle_rad
+                if self.last_png_velocity_horizontal_angle_rad is not None
+                else los_horizontal_rad
             )
 
-        return limit_vector_delta(
+        previous_vertical_rad = (
+            self.last_png_velocity_vertical_angle_rad
+            if self.last_png_velocity_vertical_angle_rad is not None
+            else velocity_vertical_rad
+        )
+        previous_horizontal_rad = (
+            self.last_png_velocity_horizontal_angle_rad
+            if self.last_png_velocity_horizontal_angle_rad is not None
+            else velocity_horizontal_rad
+        )
+
+        if (
+            self.last_png_los_vertical_angle_rad is None
+            or self.last_png_los_horizontal_angle_rad is None
+            or dt_s <= 1e-6
+        ):
+            desired_vertical_rad = los_vertical_rad
+            desired_horizontal_rad = los_horizontal_rad
+        else:
+            desired_vertical_rad = previous_vertical_rad + self.png_vertical_gain * angle_delta_rad(
+                los_vertical_rad,
+                self.last_png_los_vertical_angle_rad,
+            )
+            desired_horizontal_rad = previous_horizontal_rad + self.png_horizontal_gain * angle_delta_rad(
+                los_horizontal_rad,
+                self.last_png_los_horizontal_angle_rad,
+            )
+
+        desired_vertical_rad = clamp(
+            desired_vertical_rad,
+            -0.5 * math.pi + 1e-3,
+            0.5 * math.pi - 1e-3,
+        )
+        desired_horizontal_rad = wrap_angle_rad(desired_horizontal_rad)
+        desired_direction_ned = direction_from_ned_angles(
+            desired_vertical_rad,
+            desired_horizontal_rad,
+        )
+        raw_velocity_setpoint_ned = scale(desired_direction_ned, self.pursuit_speed_mps)
+        velocity_setpoint_ned = limit_vector_delta(
             self.last_velocity_setpoint_ned,
-            velocity_setpoint_ned,
+            raw_velocity_setpoint_ned,
             self.max_pursuit_accel_mps2 * max(dt_s, 0.0),
         )
 
-    def _proportional_navigation_accel(
-        self,
-        los_ned: Vector3,
-        dt_s: float,
-        relative_truth: RelativeTruth | None,
-    ) -> Vector3:
-        los_rate_ned = self._update_los_rate(los_ned, dt_s, relative_truth)
-        actual_closing_speed_mps = self._actual_closing_speed_mps(
-            los_ned,
-            relative_truth,
-        )
-        self.last_closing_speed_mps = actual_closing_speed_mps
+        self.last_png_los_vertical_angle_rad = los_vertical_rad
+        self.last_png_los_horizontal_angle_rad = los_horizontal_rad
+        self.last_png_velocity_vertical_angle_rad = desired_vertical_rad
+        self.last_png_velocity_horizontal_angle_rad = desired_horizontal_rad
+        self.last_png_desired_vertical_angle_rad = desired_vertical_rad
+        self.last_png_desired_horizontal_angle_rad = desired_horizontal_rad
+        self.last_commanded_closing_speed_mps = dot(velocity_setpoint_ned, los_ned)
+        self.last_closing_speed_mps = dot(current_velocity_ned, los_ned)
+        return velocity_setpoint_ned
 
-        lateral_accel_ned = scale(
-            cross(los_rate_ned, los_ned),
-            self.navigation_gain * max(actual_closing_speed_mps, 0.0),
-        )
-        lateral_accel_ned = limit_vector_norm(
-            lateral_accel_ned,
-            self.max_guidance_accel_mps2,
-        )
-
-        self.last_guidance_accel_ned = lateral_accel_ned
-        return lateral_accel_ned
-
-    def _actual_closing_speed_mps(
-        self,
-        los_ned: Vector3,
-        relative_truth: RelativeTruth | None,
-    ) -> float:
-        if relative_truth is not None:
-            return relative_truth.closing_speed_mps
-        return dot(self._current_velocity_ned(), los_ned)
+    def _velocity_tracking_accel(self, velocity_setpoint_ned: Vector3, dt_s: float) -> Vector3:
+        if dt_s <= 1e-6:
+            accel_ned = (0.0, 0.0, 0.0)
+        else:
+            accel_ned = scale(
+                subtract_vectors(velocity_setpoint_ned, self._current_velocity_ned()),
+                1.0 / dt_s,
+            )
+        accel_ned = limit_vector_norm(accel_ned, self.max_guidance_accel_mps2)
+        self.last_guidance_accel_ned = accel_ned
+        return accel_ned
 
     def _update_los_rate(
         self,
         los_ned: Vector3,
         dt_s: float,
-        relative_truth: RelativeTruth | None,
     ) -> Vector3:
         if self.last_guidance_los_ned is None or dt_s <= 1e-6:
             self.last_guidance_los_ned = los_ned
             self.last_los_rate_ned = (0.0, 0.0, 0.0)
             return self.last_los_rate_ned
 
-        if relative_truth is not None and relative_truth.range_m > 1e-3:
-            raw_los_rate_ned = scale(
-                cross(los_ned, relative_truth.velocity_ned),
-                1.0 / relative_truth.range_m,
-            )
-        else:
-            los_derivative_ned = scale(
-                subtract_vectors(los_ned, self.last_guidance_los_ned),
-                1.0 / dt_s,
-            )
-            raw_los_rate_ned = cross(los_ned, los_derivative_ned)
+        los_derivative_ned = scale(
+            subtract_vectors(los_ned, self.last_guidance_los_ned),
+            1.0 / dt_s,
+        )
+        raw_los_rate_ned = cross(los_ned, los_derivative_ned)
         alpha = self.los_rate_filter_alpha
         self.last_los_rate_ned = add_vectors(
             scale(self.last_los_rate_ned, 1.0 - alpha),
@@ -900,32 +930,6 @@ class VisualPursuitInterceptor(Node):
         )
         self.last_guidance_los_ned = los_ned
         return self.last_los_rate_ned
-
-    def _relative_truth(self, now_s: float) -> RelativeTruth | None:
-        if not self.truth_guidance_enabled:
-            return None
-        if not self._fresh_truth_feedback(now_s):
-            return None
-
-        position_ned = subtract_vectors(
-            self.target_truth_state.position_ned,
-            self.host_truth_state.position_ned,
-        )
-        velocity_ned = subtract_vectors(
-            self.target_truth_state.velocity_ned,
-            self.host_truth_state.velocity_ned,
-        )
-        range_m = vector_norm(position_ned)
-        los_ned = normalize(position_ned)
-        closing_speed_mps = -dot(velocity_ned, los_ned)
-        return RelativeTruth(
-            position_ned=position_ned,
-            velocity_ned=velocity_ned,
-            target_velocity_ned=self.target_truth_state.velocity_ned,
-            range_m=range_m,
-            los_ned=los_ned,
-            closing_speed_mps=closing_speed_mps,
-        )
 
     def _current_velocity_ned(self) -> Vector3:
         if self.vehicle_local_position is not None:
@@ -936,8 +940,6 @@ class VisualPursuitInterceptor(Node):
             )
             if all(math.isfinite(value) for value in velocity):
                 return velocity
-        if self.host_truth_state is not None:
-            return self.host_truth_state.velocity_ned
         return (0.0, 0.0, 0.0)
 
     def _reset_guidance_state(self) -> None:
@@ -946,6 +948,12 @@ class VisualPursuitInterceptor(Node):
         self.last_guidance_accel_ned = (0.0, 0.0, 0.0)
         self.last_velocity_setpoint_ned = (0.0, 0.0, 0.0)
         self.last_commanded_closing_speed_mps = 0.0
+        self.last_png_los_vertical_angle_rad = None
+        self.last_png_los_horizontal_angle_rad = None
+        self.last_png_velocity_vertical_angle_rad = None
+        self.last_png_velocity_horizontal_angle_rad = None
+        self.last_png_desired_vertical_angle_rad = None
+        self.last_png_desired_horizontal_angle_rad = None
 
     def _vertical_search_active(self, now_s: float) -> bool:
         if not self.search_vertical_motion_enabled:
@@ -1063,12 +1071,6 @@ class VisualPursuitInterceptor(Node):
         if self.yaw_mode != "face_los":
             raise ValueError(f"Unsupported yaw_mode: {self.yaw_mode!r}")
         return math.atan2(los_ned[1], los_ned[0])
-
-    def _gimbal_truth_los_error_deg(self) -> float | None:
-        if self.last_truth_los_ned is None:
-            return None
-        alignment = clamp(dot(self.last_gimbal_los_ned, self.last_truth_los_ned), -1.0, 1.0)
-        return math.degrees(math.acos(alignment))
 
     def _validate_yaw_mode(self) -> None:
         valid_modes = {"fixed_north", "face_los"}
@@ -1211,43 +1213,24 @@ class VisualPursuitInterceptor(Node):
                 "lock_loss_age_s",
                 self._lock_loss_age_s(now_us * 1e-6),
             ),
-            diagnostic_value("navigation_gain", self.navigation_gain),
+            diagnostic_value("png_vertical_gain", self.png_vertical_gain),
+            diagnostic_value("png_horizontal_gain", self.png_horizontal_gain),
             diagnostic_value(
                 "commanded_closing_speed_mps",
                 self.last_commanded_closing_speed_mps,
             ),
-            diagnostic_value("truth_guidance_enabled", self.truth_guidance_enabled),
-            diagnostic_value("truth_guidance_required", self.truth_guidance_required),
             diagnostic_value(
-                "truth_feedback_fresh",
-                self._fresh_truth_feedback(now_us * 1e-6),
+                "visual_error_fresh",
+                self._fresh_visual_error(now_us * 1e-6),
             ),
-            diagnostic_value("range_m", self.last_range_m),
+            diagnostic_value("image_yaw_error_deg", degrees_or_none(self.image_yaw_error_rad)),
+            diagnostic_value("image_pitch_error_deg", degrees_or_none(self.image_pitch_error_rad)),
+            diagnostic_value("image_error_score", self.image_error_score),
+            diagnostic_value(
+                "visual_error_age_s",
+                self._visual_error_age_s(now_us * 1e-6),
+            ),
             diagnostic_value("closing_speed_mps", self.last_closing_speed_mps),
-            diagnostic_value(
-                "relative_position_ned_x_m",
-                vector_value(self.last_relative_position_ned, 0),
-            ),
-            diagnostic_value(
-                "relative_position_ned_y_m",
-                vector_value(self.last_relative_position_ned, 1),
-            ),
-            diagnostic_value(
-                "relative_position_ned_z_m",
-                vector_value(self.last_relative_position_ned, 2),
-            ),
-            diagnostic_value(
-                "relative_velocity_ned_x_mps",
-                vector_value(self.last_relative_velocity_ned, 0),
-            ),
-            diagnostic_value(
-                "relative_velocity_ned_y_mps",
-                vector_value(self.last_relative_velocity_ned, 1),
-            ),
-            diagnostic_value(
-                "relative_velocity_ned_z_mps",
-                vector_value(self.last_relative_velocity_ned, 2),
-            ),
             diagnostic_value("gimbal_yaw_deg", degrees_or_none(self.gimbal_yaw_rad)),
             diagnostic_value("gimbal_pitch_deg", degrees_or_none(self.gimbal_pitch_rad)),
             diagnostic_value("gimbal_roll_deg", degrees_or_none(self.gimbal_roll_rad)),
@@ -1260,10 +1243,25 @@ class VisualPursuitInterceptor(Node):
             diagnostic_value("gimbal_los_ned_x", self.last_gimbal_los_ned[0]),
             diagnostic_value("gimbal_los_ned_y", self.last_gimbal_los_ned[1]),
             diagnostic_value("gimbal_los_ned_z", self.last_gimbal_los_ned[2]),
-            diagnostic_value("truth_los_ned_x", vector_value(self.last_truth_los_ned, 0)),
-            diagnostic_value("truth_los_ned_y", vector_value(self.last_truth_los_ned, 1)),
-            diagnostic_value("truth_los_ned_z", vector_value(self.last_truth_los_ned, 2)),
-            diagnostic_value("gimbal_truth_los_error_deg", self._gimbal_truth_los_error_deg()),
+            diagnostic_value("visual_los_ned_x", self.last_visual_los_ned[0]),
+            diagnostic_value("visual_los_ned_y", self.last_visual_los_ned[1]),
+            diagnostic_value("visual_los_ned_z", self.last_visual_los_ned[2]),
+            diagnostic_value(
+                "png_los_vertical_angle_deg",
+                degrees_or_none(self.last_png_los_vertical_angle_rad),
+            ),
+            diagnostic_value(
+                "png_los_horizontal_angle_deg",
+                degrees_or_none(self.last_png_los_horizontal_angle_rad),
+            ),
+            diagnostic_value(
+                "png_desired_vertical_angle_deg",
+                degrees_or_none(self.last_png_desired_vertical_angle_rad),
+            ),
+            diagnostic_value(
+                "png_desired_horizontal_angle_deg",
+                degrees_or_none(self.last_png_desired_horizontal_angle_rad),
+            ),
             diagnostic_value("los_rate_ned_x_rad_s", self.last_los_rate_ned[0]),
             diagnostic_value("los_rate_ned_y_rad_s", self.last_los_rate_ned[1]),
             diagnostic_value("los_rate_ned_z_rad_s", self.last_los_rate_ned[2]),
@@ -1341,11 +1339,56 @@ class VisualPursuitInterceptor(Node):
             return None
         return max(0.0, now_s - self.last_gimbal_search_active_time_s)
 
+    def _visual_error_age_s(self, now_s: float) -> float | None:
+        if self.last_visual_error_time_s is None:
+            return None
+        return max(0.0, now_s - self.last_visual_error_time_s)
+
 
 def gimbal_angles_to_body_los(
     yaw_rad: float,
     roll_rad: float,
     pitch_rad: float,
+    kinematics: GimbalCameraKinematics,
+) -> tuple[float, float, float]:
+    return gimbal_sensor_vector_to_body(
+        yaw_rad,
+        roll_rad,
+        pitch_rad,
+        kinematics.optical_axis_sensor,
+        kinematics,
+    )
+
+
+def gimbal_image_error_to_body_los(
+    yaw_rad: float,
+    roll_rad: float,
+    pitch_rad: float,
+    image_yaw_error_rad: float,
+    image_pitch_error_rad: float,
+    kinematics: GimbalCameraKinematics,
+) -> tuple[float, float, float]:
+    target_ray_sensor = normalize(
+        (
+            1.0,
+            math.tan(image_yaw_error_rad),
+            math.tan(image_pitch_error_rad),
+        )
+    )
+    return gimbal_sensor_vector_to_body(
+        yaw_rad,
+        roll_rad,
+        pitch_rad,
+        target_ray_sensor,
+        kinematics,
+    )
+
+
+def gimbal_sensor_vector_to_body(
+    yaw_rad: float,
+    roll_rad: float,
+    pitch_rad: float,
+    sensor_vector: Vector3,
     kinematics: GimbalCameraKinematics,
 ) -> tuple[float, float, float]:
     rotation_gazebo_base_to_sensor = matmul3(
@@ -1363,31 +1406,13 @@ def gimbal_angles_to_body_los(
     )
     los_gazebo_base = matvec3(
         rotation_gazebo_base_to_sensor,
-        kinematics.optical_axis_sensor,
+        normalize(sensor_vector),
     )
     return normalize(gazebo_flu_to_px4_frd(los_gazebo_base))
 
 
 def gazebo_flu_to_px4_frd(vector: Vector3) -> Vector3:
     return (vector[0], -vector[1], -vector[2])
-
-
-def truth_state_from_odometry(msg: Odometry, fallback_time_s: float) -> TruthState:
-    pose = msg.pose.pose
-    twist = msg.twist.twist
-    return TruthState(
-        position_ned=(
-            float(pose.position.y),
-            float(pose.position.x),
-            -float(pose.position.z),
-        ),
-        velocity_ned=(
-            float(twist.linear.y),
-            float(twist.linear.x),
-            -float(twist.linear.z),
-        ),
-        stamp_s=fallback_time_s,
-    )
 
 
 def rotation_from_rpy(
@@ -1476,6 +1501,36 @@ def rotate_body_to_ned(
         vy + w * ty + (z * tx - x * tz),
         vz + w * tz + (x * ty - y * tx),
     )
+
+
+def ned_direction_angles(vector: Vector3) -> tuple[float, float]:
+    normalized = normalize(vector)
+    horizontal_norm = math.hypot(normalized[0], normalized[1])
+    vertical_angle_rad = math.atan2(normalized[2], horizontal_norm)
+    horizontal_angle_rad = math.atan2(normalized[1], normalized[0])
+    return vertical_angle_rad, horizontal_angle_rad
+
+
+def direction_from_ned_angles(
+    vertical_angle_rad: float,
+    horizontal_angle_rad: float,
+) -> Vector3:
+    horizontal_scale = math.cos(vertical_angle_rad)
+    return normalize(
+        (
+            horizontal_scale * math.cos(horizontal_angle_rad),
+            horizontal_scale * math.sin(horizontal_angle_rad),
+            math.sin(vertical_angle_rad),
+        )
+    )
+
+
+def wrap_angle_rad(angle_rad: float) -> float:
+    return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
+
+
+def angle_delta_rad(current_rad: float, previous_rad: float) -> float:
+    return wrap_angle_rad(current_rad - previous_rad)
 
 
 def limit_vector_norm(vector: Vector3, max_norm: float) -> Vector3:
@@ -1578,10 +1633,6 @@ def degrees_or_none(value: float | None) -> float | None:
 
 def point_value(point: tuple[float, float, float] | None, index: int) -> float | None:
     return None if point is None else point[index]
-
-
-def vector_value(vector: Vector3 | None, index: int) -> float | None:
-    return None if vector is None else vector[index]
 
 
 def diagnostic_value(key: str, value: bool | float | str | None) -> KeyValue:
