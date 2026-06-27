@@ -22,6 +22,8 @@ __pycache__/
 *.db3
 /yolov8*.pt
 
+/articles/
+
 /src/uav_trajectory_tracking/config/wind.yaml
 
 # SAM6 generated build and report outputs
