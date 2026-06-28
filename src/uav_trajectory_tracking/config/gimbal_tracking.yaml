@@ -67,6 +67,7 @@ gimbal_target_tracker:
     # Match the Gazebo/PX4 gimbal yaw joint range in px4_overlays/models.
     min_yaw_deg: -1.0e16
     max_yaw_deg: 1.0e16
+    # Match cgo3_camera_joint in px4_overlays/models/gimbal_self_hidden/model.sdf.
     min_pitch_deg: -90.0
     max_pitch_deg: 90.0
 

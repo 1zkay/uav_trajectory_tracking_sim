@@ -181,7 +181,7 @@ world 中同时加载了这些传感器需要的 Gazebo 系统插件：`Imu`、`
 | ----- | ----------------------------- | ---------------------------------------------------------- | ---------- | --------------------------------- | ------: | -------: | ------: |
 | yaw   | `cgo3_vertical_arm_joint`   | `cgo3_mount_link` -> `cgo3_vertical_arm_link`          | `0 0 -1` | `-1e+16` 到 `1e+16 rad`       | `100` |   `-1` | `0.1` |
 | roll  | `cgo3_horizontal_arm_joint` | `cgo3_vertical_arm_link` -> `cgo3_horizontal_arm_link` | `-1 0 0` | `-0.785398` 到 `0.785398 rad` | `100` |   `-1` | `0.1` |
-| pitch | `cgo3_camera_joint`         | `cgo3_horizontal_arm_link` -> `camera_link`            | `0 1 0`  | `-2.35619` 到 `0.7854 rad`    | `100` |   `-1` | `0.1` |
+| pitch | `cgo3_camera_joint`         | `cgo3_horizontal_arm_link` -> `camera_link`            | `0 1 0`  | `-1.570796` 到 `1.570796 rad` | `100` |   `-1` | `0.1` |
 
 近似机械角度范围：
 
@@ -189,7 +189,7 @@ world 中同时加载了这些传感器需要的 Gazebo 系统插件：`Imu`、`
 | ----- | -------------------------: |
 | yaw   |                 近似无限制 |
 | roll  |  `-45 deg` 到 `45 deg` |
-| pitch | `-135 deg` 到 `45 deg` |
+| pitch |  `-90 deg` 到 `90 deg` |
 
 ## 云台关节控制器参数
 
@@ -251,12 +251,12 @@ PX4 Gazebo bridge 最终向这些 Gazebo topic 发布关节位置指令：
 | ------------------- | --------------: | ------------------------------- |
 | `PX4_SIM_MODEL`（PX4 仿真模型名） | `x500_gimbal` | PX4 仿真模型名                  |
 | `MNT_MODE_IN`（云台输入模式） |           `4` | MAVLink gimbal protocol v2 输入 |
-| `MNT_MODE_OUT`（云台输出模式） |           `0` | AUX/servo 输出，由 PX4 计算稳定补偿 |
+| `MNT_MODE_OUT`（云台输出模式） |           `2` | MAVLink gimbal protocol v2 输出 |
 | `MNT_DO_STAB`（云台稳定补偿） |           `1` | 对伺服云台启用三轴姿态补偿     |
 | `MNT_RC_IN_MODE`（RC 云台输入模式） |           `1` | RC 输入使用角速度模式           |
 | `MNT_RANGE_ROLL`（roll 输出范围） |     `180 deg` | roll 输出范围参数               |
 | `MNT_MAX_PITCH`（最大 pitch 输出角） |      `90 deg` | pitch 正向输出上限              |
-| `MNT_MIN_PITCH`（最小 pitch 输出角） |    `-135 deg` | pitch 负向输出下限              |
+| `MNT_MIN_PITCH`（最小 pitch 输出角） |     `-90 deg` | pitch 负向输出下限              |
 | `MNT_RANGE_YAW`（yaw 输出范围） |     `720 deg` | yaw 输出范围参数                |
 
 `MNT_MAN_ROLL`、`MNT_MAN_PITCH`、`MNT_MAN_YAW` 仅用于 AUX/manual 输入通道。

@@ -28,7 +28,8 @@ visual_error_pitch_sign: -1.0
 # first uses /gimbal_target_tracker/error.header.stamp as the measurement time.
 # The YOLO tracker re-stamps detections at image receipt with the ROS/PX4
 # control clock, so the interceptor never estimates a Gazebo-to-ROS clock offset.
-# This fixed delay is only the fallback when no usable ROS-domain stamp exists.
+# This fixed delay is only the fallback when a measurement has no stamp. A
+# stamped measurement outside the trusted window is rejected rather than re-timed.
 dkf_enabled: true
 dkf_measurement_delay_s: 0.05
 dkf_measurement_noise_std_rad: 0.017453292519943295

@@ -16,4 +16,4 @@ param set-default MNT_DO_STAB 1
 param set-default MNT_RC_IN_MODE 1
 
 param set-default MNT_MAX_PITCH 90
-param set-default MNT_MIN_PITCH -135
+param set-default MNT_MIN_PITCH -90

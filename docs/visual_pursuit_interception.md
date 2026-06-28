@@ -107,11 +107,13 @@ x = [yaw_error, pitch_error, yaw_error_rate, pitch_error_rate]
 
 拦截器不估计 Gazebo 图像 stamp 到 ROS/PX4 控制时钟的 offset。header stamp 必须已经在 ROS 域下，且相对当前控制时刻的延迟在可信范围内；诊断中正常显示为 `dkf_measurement_time_source=header`。
 
-如果 header stamp 为空、来自错误时钟域、位于未来，或延迟超过可信范围，则回退到：
+如果 header stamp 为空，则回退到：
 
 ```text
 measurement_time = now - dkf_measurement_delay_s
 ```
+
+如果 header stamp 来自错误时钟域、位于未来，或延迟超过可信范围，则本次测量不更新 DKF，只把已有状态预测到当前控制时刻，避免给旧检测帧伪造新测量时间。
 
 后续 LOS 和 PNG 使用预测后的 `dkf_yaw_error` / `dkf_pitch_error`；如果 DKF 未就绪，则回退到最新 signed 图像误差。
 

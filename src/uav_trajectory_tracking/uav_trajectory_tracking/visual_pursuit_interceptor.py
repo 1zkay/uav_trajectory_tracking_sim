@@ -620,8 +620,11 @@ class VisualPursuitInterceptor(Node):
         if self.dkf_enabled:
             measurement_time_s = self._visual_measurement_time_s(msg, now_s)
             if (
-                self.dkf_last_measurement_time_s is None
-                or measurement_time_s > self.dkf_last_measurement_time_s + 1e-6
+                measurement_time_s is not None
+                and (
+                    self.dkf_last_measurement_time_s is None
+                    or measurement_time_s > self.dkf_last_measurement_time_s + 1e-6
+                )
             ):
                 self.image_error_dkf.update(
                     self.image_yaw_error_rad,
@@ -1046,7 +1049,7 @@ class VisualPursuitInterceptor(Node):
         self,
         msg: Vector3Stamped,
         now_s: float,
-    ) -> float:
+    ) -> float | None:
         stamp_s = stamp_to_seconds(msg.header.stamp.sec, msg.header.stamp.nanosec)
         max_plausible_delay_s = min(
             self.visual_error_timeout_s,
@@ -1060,9 +1063,9 @@ class VisualPursuitInterceptor(Node):
                 self.dkf_measurement_delay_observed_s = observed_delay_s
                 return stamp_s
 
-            self.dkf_measurement_time_source = "fixed_delay_invalid_header"
-            self.dkf_measurement_delay_observed_s = self.dkf_measurement_delay_s
-            return now_s - self.dkf_measurement_delay_s
+            self.dkf_measurement_time_source = "invalid_header"
+            self.dkf_measurement_delay_observed_s = observed_delay_s
+            return None
 
         self.dkf_measurement_time_source = "fixed_delay"
         self.dkf_measurement_delay_observed_s = self.dkf_measurement_delay_s
