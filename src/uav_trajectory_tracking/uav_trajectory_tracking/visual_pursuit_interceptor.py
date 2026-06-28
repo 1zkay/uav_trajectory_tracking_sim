@@ -436,8 +436,7 @@ class VisualPursuitInterceptor(Node):
         self.dkf_pitch_rate_rad_s: float | None = None
         self.dkf_prediction_horizon_s: float | None = None
         self.dkf_last_measurement_time_s: float | None = None
-        self.dkf_last_source_stamp_s: float | None = None
-        self.dkf_source_stamp_offset_s: float | None = None
+        self.dkf_last_measurement_stamp_s: float | None = None
         self.dkf_measurement_time_source = "none"
         self.dkf_measurement_delay_observed_s: float | None = None
         self.takeoff_position: tuple[float, float, float] | None = None
@@ -1049,43 +1048,20 @@ class VisualPursuitInterceptor(Node):
         now_s: float,
     ) -> float:
         stamp_s = stamp_to_seconds(msg.header.stamp.sec, msg.header.stamp.nanosec)
-        max_plausible_delay_s = max(
-            1.0,
-            self.visual_error_timeout_s
-            + self.dkf_max_prediction_s
-            + self.dkf_measurement_delay_s,
+        max_plausible_delay_s = min(
+            self.visual_error_timeout_s,
+            self.dkf_max_prediction_s,
         )
         if stamp_s is not None:
             observed_delay_s = now_s - stamp_s
+            self.dkf_last_measurement_stamp_s = stamp_s
             if 0.0 <= observed_delay_s <= max_plausible_delay_s:
                 self.dkf_measurement_time_source = "header"
                 self.dkf_measurement_delay_observed_s = observed_delay_s
-                self.dkf_last_source_stamp_s = stamp_s
                 return stamp_s
 
-            if (
-                self.dkf_source_stamp_offset_s is None
-                or self.dkf_last_source_stamp_s is None
-                or stamp_s < self.dkf_last_source_stamp_s - 1e-6
-            ):
-                self.dkf_source_stamp_offset_s = (
-                    now_s - stamp_s - self.dkf_measurement_delay_s
-                )
-
-            measurement_time_s = stamp_s + self.dkf_source_stamp_offset_s
-            observed_delay_s = now_s - measurement_time_s
-            if 0.0 <= observed_delay_s <= max_plausible_delay_s:
-                self.dkf_measurement_time_source = "header_mapped"
-                self.dkf_measurement_delay_observed_s = observed_delay_s
-                self.dkf_last_source_stamp_s = stamp_s
-                return measurement_time_s
-
-            self.dkf_source_stamp_offset_s = (
-                now_s - stamp_s - self.dkf_measurement_delay_s
-            )
-            self.dkf_measurement_time_source = "header_mapped_reset"
+            self.dkf_measurement_time_source = "fixed_delay_invalid_header"
             self.dkf_measurement_delay_observed_s = self.dkf_measurement_delay_s
-            self.dkf_last_source_stamp_s = stamp_s
             return now_s - self.dkf_measurement_delay_s
 
         self.dkf_measurement_time_source = "fixed_delay"
@@ -1118,8 +1094,7 @@ class VisualPursuitInterceptor(Node):
         self.dkf_pitch_rate_rad_s = None
         self.dkf_prediction_horizon_s = None
         self.dkf_last_measurement_time_s = None
-        self.dkf_last_source_stamp_s = None
-        self.dkf_source_stamp_offset_s = None
+        self.dkf_last_measurement_stamp_s = None
         self.dkf_measurement_time_source = "none"
         self.dkf_measurement_delay_observed_s = None
 
@@ -1554,7 +1529,10 @@ class VisualPursuitInterceptor(Node):
                 "dkf_measurement_delay_observed_s",
                 self.dkf_measurement_delay_observed_s,
             ),
-            diagnostic_value("dkf_source_stamp_s", self.dkf_last_source_stamp_s),
+            diagnostic_value(
+                "dkf_measurement_stamp_s",
+                self.dkf_last_measurement_stamp_s,
+            ),
             diagnostic_value(
                 "dkf_prediction_horizon_s",
                 self.dkf_prediction_horizon_s,

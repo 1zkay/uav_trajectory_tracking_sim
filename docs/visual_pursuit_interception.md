@@ -89,7 +89,7 @@ TrajectorySetpoint.velocity = [vx, vy, vz]
 vector.x = raw yaw image angular error, deg
 vector.y = raw pitch image angular error, deg
 vector.z = target score
-header.stamp = selected detection/image source time when available
+header.stamp = selected detection ROS measurement time when available
 ```
 
 云台控制内部仍可对角误差使用死区；但外发给拦截器的是原始图像角测量，便于 DKF 估计连续残余角。
@@ -103,11 +103,11 @@ header.stamp = selected detection/image source time when available
 x = [yaw_error, pitch_error, yaw_error_rate, pitch_error_rate]
 ```
 
-`gimbal_target_tracker` 会把选中检测的源时间戳写入 `/error.header.stamp`。每次收到视觉误差时，DKF 优先使用该 header stamp 作为测量时刻，然后预测到当前控制时刻。同一个检测帧被云台 tracker 多次发布时，只对 DKF 做一次测量更新，后续只预测，避免重复压低协方差。
+`yolo_tracker` 在收到图像回调时用节点 ROS clock 给检测结果重打测量时间戳；`gimbal_target_tracker` 会把选中检测的这个 ROS 域时间戳写入 `/error.header.stamp`。每次收到视觉误差时，DKF 优先使用该 header stamp 作为测量时刻，然后预测到当前控制时刻。同一个检测帧被云台 tracker 多次发布时，只对 DKF 做一次测量更新，后续只预测，避免重复压低协方差。
 
-Gazebo 图像 stamp 通常是仿真时间，而 PX4 Offboard 节点的时钟通常是系统/XRCE 同步时间。两者不在同一绝对时间域时，拦截器会为源 stamp 建立稳定 offset 映射，诊断中显示为 `dkf_measurement_time_source=header_mapped`。这仍然使用图像 stamp 的相对时间推进 DKF，只是不把 Gazebo 仿真秒数直接当作 PX4/ROS 控制时钟秒数。
+拦截器不估计 Gazebo 图像 stamp 到 ROS/PX4 控制时钟的 offset。header stamp 必须已经在 ROS 域下，且相对当前控制时刻的延迟在可信范围内；诊断中正常显示为 `dkf_measurement_time_source=header`。
 
-如果 header stamp 为空，或者映射后的测量时刻仍不可用，则回退到：
+如果 header stamp 为空、来自错误时钟域、位于未来，或延迟超过可信范围，则回退到：
 
 ```text
 measurement_time = now - dkf_measurement_delay_s
@@ -197,7 +197,7 @@ dkf_enabled: true
 dkf_measurement_delay_s: 0.05
 dkf_measurement_noise_std_rad: 0.017453292519943295
 dkf_process_noise_std_rad_s2: 4.0
-dkf_max_prediction_s: 0.2
+dkf_max_prediction_s: 0.12
 
 lock_loss_grace_s: 0.4
 coast_velocity_decay_s: 0.5
@@ -228,7 +228,7 @@ ros2 topic echo /x500_0/visual_pursuit_interceptor/diagnostics --once
 - `dkf_ready`
 - `dkf_measurement_time_source`
 - `dkf_measurement_delay_observed_s`
-- `dkf_source_stamp_s`
+- `dkf_measurement_stamp_s`
 - `dkf_yaw_error_deg`
 - `dkf_pitch_error_deg`
 - `dkf_yaw_rate_deg_s`

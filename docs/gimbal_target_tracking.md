@@ -243,7 +243,7 @@ cmd_pitch = clamp(cmd_pitch + pitch_rate * dt, min_pitch, max_pitch)
 
 节点仍会通过 `/fmu/in/vehicle_command` 发送 `MAV_CMD_DO_GIMBAL_MANAGER_CONFIGURE`，把当前 `source_system/source_component` 设置为 gimbal manager primary control。节点会订阅 `/fmu/out/vehicle_command_ack`，在收到 accepted ACK 前按 `configure_retry_period_s` 周期重试，避免 PX4/gimbal 尚未准备好时一次性配置丢失。如需回退到旧实现，可将 `command_interface` 改为 `vehicle_command`，此时会连续发送 `MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW`。
 
-诊断话题 `/x500_0/gimbal_target_tracker/error` 中的 `vector.x/y` 现在分别表示原始 yaw/pitch 视线角误差，单位为 degree，`vector.z` 为目标置信度。`header.stamp` 优先使用选中检测的图像源时间戳，供拦截节点 DKF 做延迟补偿；云台控制内部仍可对该误差使用 `deadband_angle_deg`。
+诊断话题 `/x500_0/gimbal_target_tracker/error` 中的 `vector.x/y` 现在分别表示原始 yaw/pitch 视线角误差，单位为 degree，`vector.z` 为目标置信度。`header.stamp` 优先使用选中检测的 ROS 域测量时间戳，供拦截节点 DKF 做延迟补偿；云台控制内部仍可对该误差使用 `deadband_angle_deg`。
 
 `/x500_0/gimbal_target_tracker/residual_error_rate` 中的 `vector.x/y` 为滤波后的 yaw/pitch 图像残余角速度，单位为 degree/s，`vector.z` 为 `0..1` 的锁定质量。这个话题用于判断目标虽然还在画面中，但云台是否已经稳定到足以让外层导引相信 LOS。
 

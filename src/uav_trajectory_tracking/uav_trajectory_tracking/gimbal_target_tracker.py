@@ -34,8 +34,8 @@ class SelectedDetection:
     track_id: str
     class_id: str
     score: float
-    stamp_sec: int | None
-    stamp_nanosec: int | None
+    measurement_stamp_sec: int | None
+    measurement_stamp_nanosec: int | None
     center_x: float
     center_y: float
     width: float
@@ -678,14 +678,14 @@ class GimbalTargetTracker(Node):
             if self.target_class_id and class_id != self.target_class_id:
                 continue
 
-            stamp_sec, stamp_nanosec = detection_source_stamp(detection, msg)
+            stamp_sec, stamp_nanosec = detection_measurement_stamp(detection, msg)
             candidates.append(
                 SelectedDetection(
                     track_id=str(detection.id),
                     class_id=class_id,
                     score=score,
-                    stamp_sec=stamp_sec,
-                    stamp_nanosec=stamp_nanosec,
+                    measurement_stamp_sec=stamp_sec,
+                    measurement_stamp_nanosec=stamp_nanosec,
                     center_x=float(detection.bbox.center.position.x),
                     center_y=float(detection.bbox.center.position.y),
                     width=float(detection.bbox.size_x),
@@ -748,8 +748,8 @@ class GimbalTargetTracker(Node):
             track_id=detection.track_id,
             class_id=detection.class_id,
             score=detection.score,
-            stamp_sec=detection.stamp_sec,
-            stamp_nanosec=detection.stamp_nanosec,
+            measurement_stamp_sec=detection.measurement_stamp_sec,
+            measurement_stamp_nanosec=detection.measurement_stamp_nanosec,
             center_x=lerp(previous.center_x, detection.center_x, alpha),
             center_y=lerp(previous.center_y, detection.center_y, alpha),
             width=lerp(previous.width, detection.width, alpha),
@@ -1490,12 +1490,15 @@ class GimbalTargetTracker(Node):
         detection: SelectedDetection,
     ) -> None:
         msg = Vector3Stamped()
-        if detection.stamp_sec is None or detection.stamp_nanosec is None:
+        if (
+            detection.measurement_stamp_sec is None
+            or detection.measurement_stamp_nanosec is None
+        ):
             msg.header.stamp.sec = int(now_us // 1_000_000)
             msg.header.stamp.nanosec = int((now_us % 1_000_000) * 1000)
         else:
-            msg.header.stamp.sec = detection.stamp_sec
-            msg.header.stamp.nanosec = detection.stamp_nanosec
+            msg.header.stamp.sec = detection.measurement_stamp_sec
+            msg.header.stamp.nanosec = detection.measurement_stamp_nanosec
         msg.header.frame_id = "camera_link"
         msg.vector.x = float(yaw_error_deg)
         msg.vector.y = float(pitch_error_deg)
@@ -1880,7 +1883,7 @@ def squared_image_distance(a: SelectedDetection, b: SelectedDetection) -> float:
     return dx * dx + dy * dy
 
 
-def detection_source_stamp(
+def detection_measurement_stamp(
     detection: Detection2D,
     array_msg: Detection2DArray,
 ) -> tuple[int | None, int | None]:

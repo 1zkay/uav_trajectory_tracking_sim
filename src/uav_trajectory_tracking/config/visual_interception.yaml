@@ -26,14 +26,14 @@ visual_error_yaw_sign: -1.0
 visual_error_pitch_sign: -1.0
 # Delayed Kalman filter on the signed yaw/pitch image residuals. The interceptor
 # first uses /gimbal_target_tracker/error.header.stamp as the measurement time.
-# If Gazebo image stamps are in a different absolute clock domain, they are
-# mapped into the interceptor clock with a stable offset. This fixed delay is
-# only the fallback when no usable source stamp is available.
+# The YOLO tracker re-stamps detections at image receipt with the ROS/PX4
+# control clock, so the interceptor never estimates a Gazebo-to-ROS clock offset.
+# This fixed delay is only the fallback when no usable ROS-domain stamp exists.
 dkf_enabled: true
 dkf_measurement_delay_s: 0.05
 dkf_measurement_noise_std_rad: 0.017453292519943295
 dkf_process_noise_std_rad_s2: 4.0
-dkf_max_prediction_s: 0.2
+dkf_max_prediction_s: 0.12
 min_velocity_direction_mps: 0.2
 los_rate_filter_alpha: 0.35
 coast_velocity_decay_s: 0.5

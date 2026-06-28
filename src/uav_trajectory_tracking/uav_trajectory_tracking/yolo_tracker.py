@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 import time
 
+from builtin_interfaces.msg import Time as TimeMsg
 import rclpy
 from cv_bridge import CvBridge, CvBridgeError
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
@@ -114,7 +115,7 @@ class YoloTracker(Node):
         )
 
         self._frame_condition = threading.Condition()
-        self._latest_image_msg: Image | None = None
+        self._latest_image: tuple[Image, TimeMsg] | None = None
         self._latest_image_sequence = 0
         self._processed_image_sequence = 0
         self._stats_lock = threading.Lock()
@@ -162,8 +163,9 @@ class YoloTracker(Node):
         )
 
     def _image_callback(self, msg: Image) -> None:
+        received_stamp = self.get_clock().now().to_msg()
         with self._frame_condition:
-            self._latest_image_msg = msg
+            self._latest_image = (msg, received_stamp)
             self._latest_image_sequence += 1
             self._frame_condition.notify()
         with self._stats_lock:
@@ -190,15 +192,16 @@ class YoloTracker(Node):
                     self._frame_condition.wait(timeout=wait_s)
                     continue
 
-                image_msg = self._latest_image_msg
+                image = self._latest_image
                 skipped_frames = max(
                     0,
                     self._latest_image_sequence - self._processed_image_sequence - 1,
                 )
                 self._processed_image_sequence = self._latest_image_sequence
 
-            if image_msg is None:
+            if image is None:
                 continue
+            image_msg, measurement_stamp = image
 
             now_s = time.monotonic()
             last_inference_start_s = now_s
@@ -206,7 +209,7 @@ class YoloTracker(Node):
                 self._processed_frame_count += 1
                 self._dropped_frame_count += skipped_frames
             try:
-                self._process_image(image_msg, now_s)
+                self._process_image(image_msg, measurement_stamp, now_s)
             except Exception as exc:  # noqa: BLE001 - keep the worker alive after inference errors.
                 with self._stats_lock:
                     self._inference_error_count += 1
@@ -217,7 +220,12 @@ class YoloTracker(Node):
             return 0.0
         return 1.0 / self.max_inference_hz
 
-    def _process_image(self, msg: Image, inference_start_s: float) -> None:
+    def _process_image(
+        self,
+        msg: Image,
+        measurement_stamp: TimeMsg,
+        inference_start_s: float,
+    ) -> None:
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except CvBridgeError as exc:
@@ -246,7 +254,7 @@ class YoloTracker(Node):
         result = results[0]
 
         tracks = self._extract_tracks(result)
-        self.tracks_pub.publish(self._to_detection_array(msg, tracks))
+        self.tracks_pub.publish(self._to_detection_array(msg, measurement_stamp, tracks))
         with self._stats_lock:
             self._published_tracks_count += 1
             self._last_tracks_publish_time_s = time.monotonic()
@@ -378,13 +386,20 @@ class YoloTracker(Node):
             )
         return tracks
 
-    def _to_detection_array(self, source_msg: Image, tracks: list[YoloTrack]) -> Detection2DArray:
+    def _to_detection_array(
+        self,
+        source_msg: Image,
+        measurement_stamp: TimeMsg,
+        tracks: list[YoloTrack],
+    ) -> Detection2DArray:
         array_msg = Detection2DArray()
-        array_msg.header = source_msg.header
+        array_msg.header.frame_id = source_msg.header.frame_id
+        array_msg.header.stamp = measurement_stamp
 
         for track in tracks:
             detection_msg = Detection2D()
-            detection_msg.header = source_msg.header
+            detection_msg.header.frame_id = source_msg.header.frame_id
+            detection_msg.header.stamp = measurement_stamp
             detection_msg.id = track.track_id
             detection_msg.bbox.center.position.x = track.center_x
             detection_msg.bbox.center.position.y = track.center_y

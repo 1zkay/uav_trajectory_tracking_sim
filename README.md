@@ -348,7 +348,7 @@ PUBLISH_STATE_COMPARE_TOPICS=false ./scripts/start_visual_interception.sh
 - `/x500_0/yolo/tracks`: YOLO + BoT-SORT 跟踪框，类型为 `vision_msgs/Detection2DArray`，其中 `Detection2D.id` 是跨帧 track id。
 - `/x500_0/yolo/tracks_image`: YOLO + BoT-SORT 标注后的图像。
 - `/x500_0/gimbal/joint_states`: Gazebo 云台关节反馈，`gimbal_target_tracker` 用它计算 `actual_yaw/actual_pitch`。
-- `/x500_0/gimbal_target_tracker/error`: 原始图像视线角误差，`vector.x/y` 分别为 yaw/pitch 角误差，单位为 degree；`header.stamp` 优先为选中检测的图像源时间戳，云台控制内部仍可使用死区。
+- `/x500_0/gimbal_target_tracker/error`: 原始图像视线角误差，`vector.x/y` 分别为 yaw/pitch 角误差，单位为 degree；`header.stamp` 优先为选中检测的 ROS 域测量时间戳，云台控制内部仍可使用死区。
 - `/x500_0/gimbal_target_tracker/residual_error_rate`: 云台残余图像误差角速度，`x/y` 为 yaw/pitch 残差角速度，单位为 degree/s，`z` 为 `0..1` 锁定质量。
 - `/x500_0/gimbal_target_tracker/tracking_active`: 云台节点是否收到新鲜目标跟踪结果。
 - `/x500_0/gimbal_target_tracker/lock_active`: 目标是否居中且稳定到足以作为外层导引门控。
