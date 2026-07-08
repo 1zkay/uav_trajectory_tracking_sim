@@ -35,3 +35,4 @@ check_xrce_dds_link.py
 ml.txt
 px4_bridge.py
 tracker_node.py
+/rdk_hover_test/
