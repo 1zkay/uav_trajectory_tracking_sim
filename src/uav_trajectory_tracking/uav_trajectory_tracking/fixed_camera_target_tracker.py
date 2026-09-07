@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Convert tracked image coordinates to calibrated fixed-camera observations.
 
-error.x/y are atan((u-cx)/fx), atan((v-cy)/fy) in radians, positive
-right/down; error.z is detection confidence. No actuator commands are sent.
+bearing is a unit vector in the camera optical frame, stamped at acquisition.
+The scene contains one target; track IDs do not gate observations.
+Confidence remains in Detection2DArray and is used only for target selection.
 """
 from __future__ import annotations
 
@@ -17,6 +18,20 @@ from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Bool
 from vision_msgs.msg import Detection2DArray
 
+from .state_comparison import SIM_CLOCK_TOLERANCE_S
+
+
+def valid_camera_info(msg: CameraInfo) -> bool:
+    """Full-resolution, undistorted simulation pinhole camera contract."""
+    fx, fy, cx, cy = msg.k[0], msg.k[4], msg.k[2], msg.k[5]
+    return (all(math.isfinite(v) for v in (fx, fy, cx, cy))
+            and fx > 0.0 and fy > 0.0 and msg.width > 0 and msg.height > 0
+            and msg.header.frame_id.endswith("/camera_optical_frame")
+            and all(math.isfinite(v) and v == 0.0 for v in msg.d)
+            and msg.binning_x in (0, 1) and msg.binning_y in (0, 1)
+            and msg.roi.x_offset == 0 and msg.roi.y_offset == 0
+            and msg.roi.width in (0, msg.width) and msg.roi.height in (0, msg.height))
+
 
 class FixedCameraTargetTracker(Node):
     def __init__(self) -> None:
@@ -24,11 +39,10 @@ class FixedCameraTargetTracker(Node):
         defaults = {
             "detections_topic": "/x500_0/yolo/tracks",
             "camera_info_topic": "/x500_0/camera/camera_info",
-            "error_topic": "/x500_0/fixed_camera_target_tracker/error",
+            "bearing_topic": "/x500_0/fixed_camera_target_tracker/bearing",
             "tracking_active_topic": "/x500_0/fixed_camera_target_tracker/tracking_active",
             "lock_active_topic": "/x500_0/fixed_camera_target_tracker/lock_active",
             "target_class_id": "",
-            "target_track_id": "",
             "min_score": 0.2,
             "observation_timeout_s": 0.2,
             "lock_confirm_s": 0.2,
@@ -43,13 +57,11 @@ class FixedCameraTargetTracker(Node):
                 and self.confirm_s >= 0.0):
             raise ValueError("Invalid observation score, timeout or confirmation interval")
         self.target_class_id = str(self.get_parameter("target_class_id").value)
-        self.target_track_id = str(self.get_parameter("target_track_id").value)
         self.camera_info: CameraInfo | None = None
-        self.track_id: str | None = None
         self.first_stamp_s: float | None = None
         self.last_stamp_s: float | None = None
-        self.error_pub = self.create_publisher(
-            Vector3Stamped, str(self.get_parameter("error_topic").value), 10
+        self.bearing_pub = self.create_publisher(
+            Vector3Stamped, str(self.get_parameter("bearing_topic").value), 10
         )
         self.active_pub = self.create_publisher(
             Bool, str(self.get_parameter("tracking_active_topic").value), 10
@@ -68,16 +80,13 @@ class FixedCameraTargetTracker(Node):
         self.create_timer(1.0 / 30.0, self._publish_status)
 
     def _camera_info_callback(self, msg: CameraInfo) -> None:
-        fx, fy, cx, cy = msg.k[0], msg.k[4], msg.k[2], msg.k[5]
-        if (all(math.isfinite(v) for v in (fx, fy, cx, cy))
-                and fx > 0.0 and fy > 0.0 and msg.width > 0 and msg.height > 0):
+        if valid_camera_info(msg):
             self.camera_info = msg
         else:
             self.camera_info = None
             self._reset()
 
     def _reset(self) -> None:
-        self.track_id = None
         self.first_stamp_s = None
         self.last_stamp_s = None
 
@@ -90,7 +99,7 @@ class FixedCameraTargetTracker(Node):
             return
         candidates = []
         for detection in msg.detections:
-            if not detection.results or not detection.id:
+            if not detection.results:
                 continue
             result = max(detection.results, key=lambda item: item.hypothesis.score)
             score = float(result.hypothesis.score)
@@ -98,15 +107,12 @@ class FixedCameraTargetTracker(Node):
                 continue
             if self.target_class_id and result.hypothesis.class_id != self.target_class_id:
                 continue
-            wanted_id = self.target_track_id or self.track_id
-            if wanted_id and detection.id != wanted_id:
-                continue
             header = detection.header
             if header.stamp.sec == 0 and header.stamp.nanosec == 0:
                 header = msg.header
             stamp_s = header.stamp.sec + header.stamp.nanosec * 1e-9
-            # YOLO stamps the image on receipt in the ROS control clock domain.
-            if stamp_s <= 0.0 or not 0.0 <= now_s - stamp_s <= self.timeout_s:
+            # Both detections and this node use Gazebo acquisition/simulation time.
+            if stamp_s <= 0.0 or not -SIM_CLOCK_TOLERANCE_S <= now_s - stamp_s <= self.timeout_s:
                 continue
             if self.last_stamp_s is not None and stamp_s <= self.last_stamp_s:
                 continue
@@ -121,23 +127,23 @@ class FixedCameraTargetTracker(Node):
             candidates.append((score, stamp_s, detection, header))
         if not candidates:
             return
-        score, stamp_s, detection, header = max(candidates, key=lambda item: item[0])
+        _, stamp_s, detection, header = max(candidates, key=lambda item: item[0])
         if self.first_stamp_s is None:
             self.first_stamp_s = stamp_s
-        self.track_id = detection.id
         self.last_stamp_s = stamp_s
-        error = Vector3Stamped()
-        error.header = header
-        error.vector.x = math.atan2(detection.bbox.center.position.x - info.k[2], info.k[0])
-        error.vector.y = math.atan2(detection.bbox.center.position.y - info.k[5], info.k[4])
-        error.vector.z = score
-        self.error_pub.publish(error)
+        bearing = Vector3Stamped()
+        bearing.header = header
+        ray = ((detection.bbox.center.position.x-info.k[2])/info.k[0],
+               (detection.bbox.center.position.y-info.k[5])/info.k[4], 1.0)
+        norm = math.sqrt(sum(v*v for v in ray))
+        bearing.vector.x, bearing.vector.y, bearing.vector.z = (v/norm for v in ray)
+        self.bearing_pub.publish(bearing)
         self._publish_status()
 
     def _publish_status(self) -> None:
         now_s = self.get_clock().now().nanoseconds * 1e-9
         active = (self.last_stamp_s is not None
-                  and 0.0 <= now_s - self.last_stamp_s <= self.timeout_s)
+                  and -SIM_CLOCK_TOLERANCE_S <= now_s - self.last_stamp_s <= self.timeout_s)
         # Confirmation measures actual distinct observations, not timer ticks.
         locked = (active and self.first_stamp_s is not None
                   and self.last_stamp_s - self.first_stamp_s >= self.confirm_s)

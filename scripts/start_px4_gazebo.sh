@@ -42,5 +42,7 @@ if [[ -f "${PYTHON_VENV}/bin/activate" ]]; then
 fi
 
 export PX4_GZ_WORLD
+# Gazebo /clock is the common time source for PX4 and ROS.
+export PX4_PARAM_UXRCE_DDS_SYNCT=0
 
 exec make px4_sitl gz_x500_mono_cam

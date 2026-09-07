@@ -30,9 +30,7 @@ setup(
             "trajectory_logger = uav_trajectory_tracking.trajectory_logger:main",
             "yolo_tracker = uav_trajectory_tracking.yolo_tracker:main",
             "yolo_annotator = uav_trajectory_tracking.yolo_annotator:main",
-            "gimbal_target_tracker = uav_trajectory_tracking.gimbal_target_tracker:main",
             "fixed_camera_target_tracker = uav_trajectory_tracking.fixed_camera_target_tracker:main",
-            "gimbal_performance_monitor = uav_trajectory_tracking.gimbal_performance_monitor:main",
         ],
     },
 )

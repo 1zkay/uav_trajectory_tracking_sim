@@ -1,8 +1,9 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node
+from launch_ros.actions import Node, SetParameter
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
@@ -14,6 +15,7 @@ def generate_launch_description():
     vehicle_local_position_topic = LaunchConfiguration("vehicle_local_position_topic")
     vehicle_attitude_topic = LaunchConfiguration("vehicle_attitude_topic")
     vehicle_odometry_topic = LaunchConfiguration("vehicle_odometry_topic")
+    logger_config_file = LaunchConfiguration("logger_config_file")
     host_truth_odometry_topic = LaunchConfiguration("host_truth_odometry_topic")
     enable_truth_odometry_bridge = LaunchConfiguration("enable_truth_odometry_bridge")
     offboard_control_mode_topic = LaunchConfiguration("offboard_control_mode_topic")
@@ -26,7 +28,6 @@ def generate_launch_description():
     source_component = LaunchConfiguration("source_component")
 
     enable_camera_bridge = LaunchConfiguration("enable_camera_bridge")
-    camera_image_bridge_qos = LaunchConfiguration("camera_image_bridge_qos")
     camera_gazebo_topic = LaunchConfiguration("camera_gazebo_topic")
     camera_image_topic = LaunchConfiguration("camera_image_topic")
     camera_info_gazebo_topic = LaunchConfiguration("camera_info_gazebo_topic")
@@ -58,12 +59,18 @@ def generate_launch_description():
     state_compare_topic_prefix = LaunchConfiguration("state_compare_topic_prefix")
 
     fixed_camera_config_file = LaunchConfiguration("fixed_camera_config_file")
-    visual_error_topic = LaunchConfiguration("visual_error_topic")
+    bearing_topic = LaunchConfiguration("bearing_topic")
     tracking_active_topic = LaunchConfiguration("tracking_active_topic")
     lock_active_topic = LaunchConfiguration("lock_active_topic")
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "logger_config_file",
+                default_value=PathJoinSubstitution([
+                    FindPackageShare("uav_trajectory_tracking"), "config", "trajectory_logging.yaml"]),
+                description="Logger time-pairing and simulation reference-frame configuration.",
+            ),
             DeclareLaunchArgument(
                 "node_namespace",
                 default_value="",
@@ -145,11 +152,6 @@ def generate_launch_description():
                 description="Bridge the host fixed camera image and CameraInfo to ROS 2.",
             ),
             DeclareLaunchArgument(
-                "camera_image_bridge_qos",
-                default_value="default",
-                description="QoS profile for ros_gz_image image_bridge.",
-            ),
-            DeclareLaunchArgument(
                 "camera_gazebo_topic",
                 default_value="/world/trajectory_tracking/model/x500_0/link/camera_link/sensor/camera/image",
                 description="Gazebo image topic produced by the host fixed camera.",
@@ -215,9 +217,9 @@ def generate_launch_description():
                 default_value=PathJoinSubstitution([
                     FindPackageShare("uav_trajectory_tracking"), "config", "fixed_camera_tracking.yaml"
                 ]),
-                description="Calibrated fixed-camera target observation parameters.",
+                description="Observer parameters and observation lifetime shared with guidance.",
             ),
-            DeclareLaunchArgument("visual_error_topic", default_value="/x500_0/fixed_camera_target_tracker/error"),
+            DeclareLaunchArgument("bearing_topic", default_value="/x500_0/fixed_camera_target_tracker/bearing"),
             DeclareLaunchArgument("tracking_active_topic", default_value="/x500_0/fixed_camera_target_tracker/tracking_active"),
             DeclareLaunchArgument("lock_active_topic", default_value="/x500_0/fixed_camera_target_tracker/lock_active"),
             DeclareLaunchArgument(
@@ -267,6 +269,7 @@ def generate_launch_description():
                 default_value="/x500_0/state_compare",
                 description="Topic prefix for online state comparison Vector3Stamped topics.",
             ),
+            SetParameter(name="use_sim_time", value=True),
             Node(
                 package="ros_gz_bridge",
                 executable="parameter_bridge",
@@ -296,39 +299,28 @@ def generate_launch_description():
                         "vehicle_attitude_topic": vehicle_attitude_topic,
                         "vehicle_odometry_topic": vehicle_odometry_topic,
                         "gazebo_odometry_topic": host_truth_odometry_topic,
+                        "config_file": logger_config_file,
                         "publish_state_compare_topics": ParameterValue(
                             publish_state_compare_topics,
                             value_type=bool,
                         ),
                         "state_compare_topic_prefix": state_compare_topic_prefix,
+                        "control_diagnostics_topic": visual_interception_diagnostics_topic,
                     }
                 ],
             ),
-            Node(
-                package="ros_gz_image",
-                executable="image_bridge",
-                name="x500_0_camera_image_bridge",
-                namespace=node_namespace,
-                output="screen",
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(PathJoinSubstitution([
+                    FindPackageShare("uav_trajectory_tracking"), "launch", "camera.launch.py"])),
                 condition=IfCondition(enable_camera_bridge),
-                arguments=[camera_gazebo_topic],
-                parameters=[{"qos": camera_image_bridge_qos}],
-                remappings=[(camera_gazebo_topic, camera_image_topic)],
-            ),
-            Node(
-                package="ros_gz_bridge",
-                executable="parameter_bridge",
-                name="x500_0_camera_info_bridge",
-                namespace=node_namespace,
-                output="screen",
-                condition=IfCondition(enable_camera_bridge),
-                arguments=[
-                    [
-                        camera_info_gazebo_topic,
-                        "@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
-                    ]
-                ],
-                remappings=[(camera_info_gazebo_topic, camera_info_topic)],
+                launch_arguments={
+                    "node_namespace": node_namespace,
+                    "camera_gazebo_topic": camera_gazebo_topic,
+                    "camera_image_topic": camera_image_topic,
+                    "camera_info_gazebo_topic": camera_info_gazebo_topic,
+                    "camera_info_topic": camera_info_topic,
+                    "camera_config_file": visual_interception_config_file,
+                }.items(),
             ),
             Node(
                 package="uav_trajectory_tracking",
@@ -374,7 +366,7 @@ def generate_launch_description():
                 parameters=[fixed_camera_config_file, {
                     "detections_topic": yolo_tracks_topic,
                     "camera_info_topic": camera_info_topic,
-                    "error_topic": visual_error_topic,
+                    "bearing_topic": bearing_topic,
                     "tracking_active_topic": tracking_active_topic,
                     "lock_active_topic": lock_active_topic,
                 }],
@@ -386,12 +378,14 @@ def generate_launch_description():
                 namespace=node_namespace,
                 output="screen",
                 parameters=[
+                    fixed_camera_config_file,
                     {
                         "config_file": visual_interception_config_file,
                         "vehicle_status_topic": vehicle_status_topic,
                         "vehicle_local_position_topic": vehicle_local_position_topic,
-                        "vehicle_attitude_topic": vehicle_attitude_topic,
-                        "visual_error_topic": visual_error_topic,
+                        "vehicle_odometry_topic": vehicle_odometry_topic,
+                        "camera_info_topic": camera_info_topic,
+                        "bearing_topic": bearing_topic,
                         "tracking_active_topic": tracking_active_topic,
                         "lock_active_topic": lock_active_topic,
                         "offboard_control_mode_topic": offboard_control_mode_topic,

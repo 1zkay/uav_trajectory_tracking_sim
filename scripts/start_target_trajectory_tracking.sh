@@ -3,7 +3,7 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-TRAJECTORY_FILE="${TRAJECTORY_FILE:-${SIM_ROOT}/src/uav_trajectory_tracking/config/target_trajectory_hold.yaml}"
+TRAJECTORY_FILE="${TRAJECTORY_FILE:-${SIM_ROOT}/src/uav_trajectory_tracking/config/trajectory_figure8.yaml}"
 PX4_ROS_NAMESPACE="${PX4_ROS_NAMESPACE:-/px4_1}"
 TARGET_NODE_NAMESPACE="${TARGET_NODE_NAMESPACE:-target}"
 TARGET_SYSTEM="${TARGET_SYSTEM:-2}"
@@ -64,19 +64,17 @@ add_launch_arg "publish_state_compare_topics" "${PUBLISH_STATE_COMPARE_TOPICS}"
 add_launch_arg "state_compare_topic_prefix" "${STATE_COMPARE_TOPIC_PREFIX}"
 
 # Target UAV tracking should only control the target vehicle trajectory.
-# Keep the host-camera vision and gimbal-servo pipeline owned by
+# Keep the host-camera vision pipeline owned by
 # scripts/start_trajectory_tracking.sh to avoid duplicate subscribers and
 # publishers on /x500_0/camera/* and /x500_0/yolo/*.
 add_launch_arg "enable_camera_bridge" "false"
 add_launch_arg "enable_yolo_tracking" "false"
 add_launch_arg "enable_yolo_annotation" "false"
-add_launch_arg "enable_gimbal_tracking" "false"
-add_launch_arg "enable_gimbal_performance_monitor" "false"
 
 if [[ -n "${LOG_ROOT}" ]]; then
   add_launch_arg "log_root" "${LOG_ROOT}"
 fi
 
 echo "Launching target trajectory tracker for ${PX4_ROS_NAMESPACE} with ${TRAJECTORY_FILE}"
-echo "Target vision/gimbal pipeline: disabled"
+echo "Target vision pipeline: disabled"
 exec ros2 launch uav_trajectory_tracking trajectory_tracking.launch.py "${launch_args[@]}"

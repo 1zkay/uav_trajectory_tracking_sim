@@ -1,50 +1,43 @@
 # Fixed forward monocular camera, using the official x500_mono_cam mounting.
 frame: NED
-camera_mount: fixed
-# Fixed camera rotation in Gazebo body FLU, matching CameraJoint in upstream SDF.
+# Sensor pose relative to base_link FLU (not relative to the model origin).
+camera_mount_translation_flu_m: [0.12, 0.03, 0.002]
 camera_mount_rpy_rad: [0.0, 0.0, 0.0]
-# Scan vehicle yaw at the hover point when no target is visible.
+# With no visible target, hold XY while scanning yaw and altitude.
 search_yaw_rate_deg_s: 20.0
+# Sinusoidal Z scan about the entry altitude; zero amplitude disables it.
+# Limits are PX4 local NED coordinates, not height above terrain.
+search_vertical_amplitude_m: 4.0
+search_vertical_period_s: 12.0
+search_vertical_min_z_ned: -8.0
+search_vertical_max_z_ned: -2.0
 
-control_rate_hz: 30.0
+control_rate_hz: 100.0
 takeoff_warmup_s: 1.0
 initial_hover_position_ned: [0.0, 0.0, -5.0]
 hover_acceptance_radius_m: 0.15
 
-# Desired ownship speed magnitude for the paper-style PNG desired velocity.
-pursuit_speed_mps: 3.0
-max_pursuit_accel_mps2: 2.0
-
+# Velocity-reference ceiling and ramp rate for the PX4 velocity controller.
+max_pursuit_speed_mps: 3.0
+speed_accel_mps2: 1.0
 # Paper-style PNG velocity-angle gains for the visual LOS.
-png_vertical_gain: 3.5
-png_horizontal_gain: 3.5
-max_guidance_accel_mps2: 2.0
-visual_error_timeout_s: 0.2
-# fixed_camera_target_tracker reports image angular errors in radians:
-# +yaw means target appears right in the image, +pitch means target appears lower.
-# The fixed-camera projection converts optical right/down directly to body FRD.
-visual_error_yaw_sign: 1.0
-visual_error_pitch_sign: 1.0
-# Delayed Kalman filter on the signed yaw/pitch image residuals. The interceptor
-# first uses /fixed_camera_target_tracker/error.header.stamp as the measurement time.
-# The YOLO tracker re-stamps detections at image receipt with the ROS/PX4
-# control clock, so the interceptor never estimates a Gazebo-to-ROS clock offset.
-# This fixed delay is only the fallback when a measurement has no stamp. A
-# stamped measurement outside the trusted window is rejected rather than re-timed.
-dkf_enabled: true
-dkf_measurement_delay_s: 0.05
-dkf_measurement_noise_std_rad: 0.017453292519943295
-dkf_process_noise_std_rad_s2: 4.0
-dkf_max_prediction_s: 0.12
+png_vertical_gain: 3.0
+png_horizontal_gain: 3.0
+# Acquisition-stamped optical bearing -> attitude SLERP -> NED LOS filter.
+# PX4 and ROS use Gazebo /clock; invalid/expired observations never refresh guidance.
+state_timeout_s: 0.5  # Position/attitude; 2 Hz VehicleStatus has a separate 1 s timeout.
+attitude_max_gap_s: 0.1
+los_filter_enabled: true
+los_filter_measurement_noise_std_rad: 0.017453292519943295
+los_filter_process_noise_std_rad_s2: 4.0
+los_filter_max_prediction_s: 0.12
 min_velocity_direction_mps: 0.2
-los_rate_filter_alpha: 0.35
 coast_velocity_decay_s: 0.5
 
 # Confirmed fresh observations gate guidance; a fixed camera need not center
 # the target before starting. Retain the existing outer-loop loss grace.
 lock_loss_grace_s: 0.4
-tracking_active_timeout_s: 0.2
-lock_active_timeout_s: 0.2
+# Reception timeout for both tracking_active and lock_active status topics.
+tracking_status_timeout_s: 0.2
 hold_position_on_loss: true
-search_vertical_motion_enabled: false
 yaw_mode: face_los

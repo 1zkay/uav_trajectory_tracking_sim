@@ -1,0 +1,9 @@
+# Matches trajectory_tracking.sdf: EARTH_WGS84, ENU, heading 0.
+# GZBridge uses NavSat altitude as both MSL and ellipsoid altitude in this SITL.
+world_origin_lat_lon_alt: [47.397971057728974, 8.546163739800146, 0.0]
+# Model origin -> PX4 body origin (base_link), expressed in model FLU.
+# Both x500 wrappers include x500_base at z=0.24 m; IMU is at base_link.
+truth_body_offset_flu_m: [0.0, 0.0, 0.24]
+# Interpolate only inside a short truth bracket, never extrapolate.
+comparison_max_gap_s: 0.1
+comparison_max_age_s: 0.5

@@ -13,8 +13,8 @@ yaw_mode: face_velocity
 
 curve:
   # One full shuttle cycle: y_start -> y_start + segment_length -> y_start.
-  # With segment_length=8 m and duration=45.714 s, the cruise speed is 0.35 m/s.
-  duration_s: 45.714285714
+  # With segment_length=8 m and duration=11.429 s, the cruise speed is 1.4 m/s.
+  duration_s: 11.428571429
   constants:
     x0: -4.0
     y_start: 4.0

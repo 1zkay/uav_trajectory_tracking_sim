@@ -1,9 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<sdf version='1.9'>
+<sdf version='1.9' xmlns:experimental='http://sdformat.org/schemas/experimental'>
   <model name='x500_mono_cam_trajectory_wind'>
-    <!-- Keep the upstream camera pose, fixed CameraJoint and sensor intact. -->
+    <!-- Keep the upstream camera and fixed joint; override only image size. -->
     <include merge='true'>
       <uri>model://x500_mono_cam</uri>
+      <experimental:params>
+        <sensor element_id='camera_link::camera' action='modify'>
+          <camera>
+            <image>
+              <width>1920</width>
+              <height>1080</height>
+            </image>
+          </camera>
+        </sensor>
+      </experimental:params>
     </include>
     <enable_wind>true</enable_wind>
     <plugin filename="gz-sim-odometry-publisher-system"

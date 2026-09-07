@@ -2,17 +2,25 @@
 
 import csv
 import math
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from rclpy.clock import Clock, ClockType
 from geometry_msgs.msg import Vector3Stamped
 from nav_msgs.msg import Odometry
 from px4_msgs.msg import VehicleAttitude, VehicleLocalPosition, VehicleOdometry
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+
+
+from .state_comparison import SIM_CLOCK_TOLERANCE_S, Sample, SamplePairs, world_to_geodetic, geodetic_to_px4_ned
 
 
 CompareSpec = tuple[str, str, str, str, str]
@@ -68,6 +76,7 @@ class TrajectoryLogger(Node):
     def __init__(self) -> None:
         super().__init__("trajectory_logger")
 
+        self.declare_parameter("config_file", "")
         self.declare_parameter("log_root", "")
         self.declare_parameter("run_id", "")
         self.declare_parameter("vehicle_local_position_topic", "/fmu/out/vehicle_local_position_v1")
@@ -76,11 +85,11 @@ class TrajectoryLogger(Node):
         self.declare_parameter("gazebo_odometry_topic", "/model/x500_0/odometry_with_covariance")
         self.declare_parameter("publish_state_compare_topics", True)
         self.declare_parameter("state_compare_topic_prefix", "state_compare")
+        self.declare_parameter("control_diagnostics_topic", "")
 
         self.latest_attitude: VehicleAttitude | None = None
         self.latest_px4_odometry: VehicleOdometry | None = None
-        self.latest_px4_compare: dict[str, tuple[float, float, float]] = {}
-        self.latest_truth_compare: dict[str, tuple[float, float, float]] = {}
+        self._configure_comparison()
         self.last_truth_time_s: float | None = None
         self.last_truth_velocity: tuple[float, float, float] | None = None
         self.ros_start_time_s = self._ros_now_s()
@@ -88,8 +97,28 @@ class TrajectoryLogger(Node):
         self.first_gazebo_time_s: float | None = None
 
         self.log_dir = self._make_log_dir()
+        metadata = {
+            "schema_version": 2,
+            "comparison_time_domain": "gazebo_sim",
+            "reference_point": "px4_body_origin",
+            "world_origin_lat_lon_alt": list(self.world_origin),
+            "truth_body_offset_flu_m": list(self.body_offset),
+            **{name: self.get_parameter(name).value for name in (
+                "comparison_max_gap_s", "comparison_max_age_s",
+                "vehicle_local_position_topic", "vehicle_attitude_topic", "vehicle_odometry_topic",
+                "gazebo_odometry_topic", "state_compare_topic_prefix")},
+        }
+        (self.log_dir / "alignment_config.yaml").write_text(
+            yaml.safe_dump(metadata, sort_keys=False), encoding="utf-8")
         self.px4_file, self.px4_writer = self._open_writer("px4_estimate.csv", px4_fieldnames())
         self.truth_file, self.truth_writer = self._open_writer("gazebo_truth.csv", truth_fieldnames())
+        self.compare_file, self.compare_writer = self._open_writer(
+            "state_comparison.csv", comparison_fieldnames())
+        self.control_file = None
+        control_topic = str(self.get_parameter("control_diagnostics_topic").value)
+        if control_topic:
+            self.create_subscription(DiagnosticArray, control_topic,
+                                     self._control_diagnostics_callback, 10)
 
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -135,6 +164,10 @@ class TrajectoryLogger(Node):
         )
 
         self.state_compare_publishers = self._make_state_compare_publishers()
+        self.comparison_status_pub = self.create_publisher(
+            DiagnosticArray, f"{self.state_compare_topic_prefix}/status", 10)
+        self.status_timer = self.create_timer(
+            0.5, self._publish_comparison_status, clock=Clock(clock_type=ClockType.STEADY_TIME))
 
         self.get_logger().info(f"Logging trajectories to {self.log_dir}")
         self.get_logger().info(
@@ -146,6 +179,206 @@ class TrajectoryLogger(Node):
             self.get_logger().info(
                 f"Publishing online state comparison topics under {self.state_compare_topic_prefix}"
             )
+
+    def _control_diagnostics_callback(self, msg: DiagnosticArray) -> None:
+        for status in msg.status:
+            if status.name != "visual_pursuit_interceptor":
+                continue
+            row = {"sample_sim_time_s": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+                   **{item.key: item.value for item in status.values}}
+            if self.control_file is None:
+                self.control_file, self.control_writer = self._open_writer(
+                    "visual_control.csv", list(row))
+            self.control_writer.writerow(row)
+
+    def _configure_comparison(self) -> None:
+        config_path = str(self.get_parameter("config_file").value)
+        if not config_path:
+            config_path = str(Path(get_package_share_directory("uav_trajectory_tracking"))
+                              / "config" / "trajectory_logging.yaml")
+        config = yaml.safe_load(Path(config_path).expanduser().read_text())
+        for name in ("world_origin_lat_lon_alt", "truth_body_offset_flu_m",
+                     "comparison_max_gap_s", "comparison_max_age_s"):
+            self.declare_parameter(name, config[name])
+        self.world_origin = tuple(self.get_parameter("world_origin_lat_lon_alt").value)
+        self.body_offset = tuple(self.get_parameter("truth_body_offset_flu_m").value)
+        for value in (self.world_origin, self.body_offset):
+            if len(value) != 3 or not all(math.isfinite(x) for x in value):
+                raise ValueError("World origin and body offset must be finite three-vectors.")
+        if not -90 < self.world_origin[0] < 90 or not -180 <= self.world_origin[1] <= 180:
+            raise ValueError("Invalid world latitude/longitude.")
+        for name in ("comparison_max_gap_s", "comparison_max_age_s"):
+            value = float(self.get_parameter(name).value)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive.")
+            setattr(self, name, value)
+        self.pairs = SamplePairs(self.comparison_max_gap_s, self.comparison_max_age_s)
+        self.reference: tuple[float, float, float] | None = None
+        self.reference_key = None
+        self.last_px4_message_times = {}
+        self.last_pair_by_key = {}
+        self.local_reset_counters = None
+        self.attitude_reset_counter = None
+        self.odometry_reset_counter = None
+        self.last_compare_truth_time_s: float | None = None
+        self.last_body_velocity = None
+        self.last_body_velocity_time_s = None
+        self.last_pair_received_s: float | None = None
+        self.pair_count = 0
+        self.rejected_count = 0
+        self.comparison_epoch = 0
+        self.last_reset_reason = "startup"
+
+    def _monotonic_s(self) -> float:
+        return time.monotonic()
+
+    def _reset_comparison(self, reason: str) -> None:
+        self.pairs.clear()
+        self.last_body_velocity = None
+        self.last_body_velocity_time_s = None
+        self.last_pair_received_s = None
+        self.last_pair_by_key.clear()
+        self.comparison_epoch += 1
+        self.last_reset_reason = reason
+
+    def _accept_px4_message(self, source: str, timestamp_sample_us: int) -> float | None:
+        # Native PX4 timestamps already use Gazebo time with UXRCE_DDS_SYNCT=0.
+        sample_time = int(timestamp_sample_us) * 1e-6
+        age = self._ros_now_s() - sample_time
+        previous = self.last_px4_message_times.get(source)
+        if (timestamp_sample_us <= 0 or not -SIM_CLOCK_TOLERANCE_S <= age <= self.comparison_max_age_s
+                or (previous is not None and sample_time <= previous)):
+            self.rejected_count += 1
+            return None
+        self.last_px4_message_times[source] = sample_time
+        return sample_time
+
+    def _update_reference(self, msg: VehicleLocalPosition) -> None:
+        reference = (float(msg.ref_lat), float(msg.ref_lon), float(msg.ref_alt))
+        valid = (msg.xy_global and msg.z_global and msg.ref_timestamp > 0
+                 and all(math.isfinite(v) for v in reference)
+                 and -90 < reference[0] < 90 and -180 <= reference[1] <= 180)
+        key = (int(msg.ref_timestamp), *reference) if valid else None
+        counters = (msg.xy_reset_counter, msg.z_reset_counter,
+                    msg.vxy_reset_counter, msg.vz_reset_counter, msg.heading_reset_counter)
+        if key != self.reference_key:
+            self._reset_comparison("local_reference_changed")
+        elif self.local_reset_counters is not None and counters != self.local_reset_counters:
+            self._reset_comparison("local_estimator_reset")
+        self.reference_key = key
+        self.reference = reference if valid else None
+        self.local_reset_counters = counters
+
+    def _queue_px4(self, key: str, sample_time: float, value: tuple) -> None:
+        sample = Sample(sample_time, tuple(float(v) for v in value), self._monotonic_s(),
+                        self.reference)
+        if not self.pairs.add("px4", key, sample):
+            self.rejected_count += 1
+
+    def _queue_truth(self, stamp_s, position, quaternion, velocity_body, omega_body) -> None:
+        values = (*position, *quaternion, *velocity_body, *omega_body)
+        if not all(math.isfinite(v) for v in values) or sum(v*v for v in quaternion) < 1e-12:
+            self.rejected_count += 1
+            self.pairs.truth.clear()
+            self.last_body_velocity = None
+            return
+        if stamp_s == self.last_compare_truth_time_s:
+            self.rejected_count += 1
+            return
+        self.last_compare_truth_time_s = stamp_s
+        rotation = quaternion_to_matrix(quaternion)
+        offset_world = matvec(rotation, self.body_offset)
+        position_body = tuple(p+r for p,r in zip(position, offset_world))
+        # Rigid-body transport: v_body_origin = v_model_origin + omega cross r.
+        wx, wy, wz = omega_body
+        rx, ry, rz = self.body_offset
+        cross = (wy*rz-wz*ry, wz*rx-wx*rz, wx*ry-wy*rx)
+        corrected_velocity = tuple(v+c for v,c in zip(velocity_body, cross))
+        velocity_ned = body_flu_vector_to_ned(quaternion, corrected_velocity)
+        values = {
+            "position": position_body,  # world ENU; mapped with each PX4 sample's origin
+            "velocity": velocity_ned,
+            "rpy": enu_flu_quaternion_to_ned_frd(quaternion),
+            "angular_velocity": body_flu_vector_to_body_frd(omega_body),
+        }
+        received_s = self._monotonic_s()
+        for key, value in values.items():
+            self.pairs.add("truth", key, Sample(stamp_s, value, received_s))
+        if self.last_body_velocity is not None:
+            dt = stamp_s-self.last_body_velocity_time_s
+            if 0 < dt <= self.comparison_max_gap_s:
+                acceleration = tuple((v-old)/dt for v,old in zip(velocity_ned,self.last_body_velocity))
+                # A finite difference represents the interval midpoint, not its end.
+                midpoint = (stamp_s+self.last_body_velocity_time_s)/2
+                self.pairs.add("truth", "acceleration", Sample(midpoint, acceleration, received_s))
+        self.last_body_velocity = velocity_ned
+        self.last_body_velocity_time_s = stamp_s
+
+    def _flush_pairs(self) -> None:
+        now_s = self._monotonic_s()
+        for key, sample, truth, left_s, right_s in self.pairs.ready(now_s):
+            px4 = sample.value
+            if key == "position":
+                if sample.reference is None:
+                    continue
+                truth = geodetic_to_px4_ned(world_to_geodetic(truth, self.world_origin), sample.reference)
+            elif key == "rpy":
+                px4, truth = quaternion_to_rpy(px4), quaternion_to_rpy(truth)
+            error = tuple(a-b for a,b in zip(px4,truth))
+            if key == "rpy":
+                error = tuple(wrap_pi(v) for v in error)
+            _, px4_topic, truth_topic, error_topic, frame = STATE_COMPARE_BY_KEY[key]
+            # Distinct frame names for each vehicle's independent local origin.
+            frame_id = f"{self.state_compare_topic_prefix.strip('/')}/{frame}"
+            for topic, value in ((px4_topic,px4),(truth_topic,truth),(error_topic,error)):
+                self._publish_vector(topic, value, frame_id, sample.time_s)
+            row = {
+                "sample_sim_time_s": fmt_time(sample.time_s), "quantity": key,
+                "truth_left_sim_time_s": fmt_time(left_s), "truth_right_sim_time_s": fmt_time(right_s),
+                "truth_bracket_s": fmt_time(right_s-left_s),
+                "px4_queue_age_s": fmt_time(now_s-sample.received_s),
+                "alignment_epoch": self.comparison_epoch, "frame_id": frame_id,
+                "ros_publish_time_s": fmt_time(self._ros_now_s()),
+            }
+            if sample.reference is not None:
+                row.update(zip(("ref_lat", "ref_lon", "ref_alt"), sample.reference))
+            for name, values in (("px4",px4),("truth",truth),("error",error)):
+                row.update({f"{name}_{axis}": fmt_float(value) for axis,value in zip("xyz",values)})
+            self.compare_writer.writerow(row)
+            self.pair_count += 1
+            self.last_pair_received_s = now_s
+            self.last_pair_by_key[key] = now_s
+
+    def _publish_comparison_status(self) -> None:
+        now_s = self._monotonic_s()
+        # Expire pending samples even if one or both data sources stop.
+        self._flush_pairs()
+        if self._ros_now_s() <= 0:
+            state = "waiting_for_sim_clock"
+        elif self.reference is None:
+            state = "waiting_for_global_reference"
+        elif self.last_pair_received_s is None or now_s-self.last_pair_received_s > self.comparison_max_age_s:
+            state = "waiting_for_paired_samples"
+        elif any(key not in self.last_pair_by_key or now_s-self.last_pair_by_key[key] > self.comparison_max_age_s
+                 for key in STATE_COMPARE_BY_KEY):
+            state = "partially_paired"
+        else:
+            state = "paired"
+        status = DiagnosticStatus()
+        status.name = f"{self.state_compare_topic_prefix}/alignment"
+        status.level = DiagnosticStatus.OK if state == "paired" else DiagnosticStatus.WARN
+        status.message = state
+        values = {"time_domain": "gazebo_sim", "position_alignment": "px4_global_reference",
+                  "reference_point": "body_origin", "alignment_epoch": self.comparison_epoch,
+                  "last_reset_reason": self.last_reset_reason, "paired_samples": self.pair_count,
+                  "rejected_samples": self.rejected_count, "unpaired_samples": self.pairs.dropped,
+                  "fresh_quantities": ",".join(key for key,stamp in self.last_pair_by_key.items()
+                                              if now_s-stamp <= self.comparison_max_age_s)}
+        status.values = [KeyValue(key=k, value=str(v)) for k,v in values.items()]
+        msg = DiagnosticArray()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.status = [status]
+        self.comparison_status_pub.publish(msg)
 
     def _make_log_dir(self) -> Path:
         log_root = str(self.get_parameter("log_root").value)
@@ -180,9 +413,25 @@ class TrajectoryLogger(Node):
 
     def _vehicle_attitude_callback(self, msg: VehicleAttitude) -> None:
         self.latest_attitude = msg
+        sample_time = self._accept_px4_message("attitude", msg.timestamp_sample)
+        if sample_time is None:
+            return
+        if self.attitude_reset_counter is not None and self.attitude_reset_counter != msg.quat_reset_counter:
+            self._reset_comparison("attitude_reset")
+        self.attitude_reset_counter = msg.quat_reset_counter
+        self._queue_px4("rpy", sample_time, tuple(msg.q))
+        self._flush_pairs()
 
     def _vehicle_odometry_callback(self, msg: VehicleOdometry) -> None:
         self.latest_px4_odometry = msg
+        sample_time = self._accept_px4_message("odometry", msg.timestamp_sample)
+        if sample_time is None:
+            return
+        if self.odometry_reset_counter is not None and self.odometry_reset_counter != msg.reset_counter:
+            self._reset_comparison("odometry_reset")
+        self.odometry_reset_counter = msg.reset_counter
+        self._queue_px4("angular_velocity", sample_time, tuple(msg.angular_velocity))
+        self._flush_pairs()
 
     def _vehicle_local_position_callback(self, msg: VehicleLocalPosition) -> None:
         q = self._latest_px4_quaternion()
@@ -194,6 +443,8 @@ class TrajectoryLogger(Node):
         )
 
         ros_time_s = self._ros_now_s()
+        if self.ros_start_time_s <= 0:
+            self.ros_start_time_s = ros_time_s
         px4_time_s = float(msg.timestamp) * 1e-6
         if self.first_px4_timestamp_us is None:
             self.first_px4_timestamp_us = int(msg.timestamp)
@@ -206,6 +457,15 @@ class TrajectoryLogger(Node):
             "px4_elapsed_s": fmt_time(px4_elapsed_s),
             "px4_timestamp_us": msg.timestamp,
             "px4_timestamp_sample_us": msg.timestamp_sample,
+            "sample_sim_time_s": fmt_time(msg.timestamp_sample * 1e-6) if msg.timestamp_sample else "",
+            "ref_timestamp": msg.ref_timestamp,
+            "ref_lat": msg.ref_lat, "ref_lon": msg.ref_lon, "ref_alt": msg.ref_alt,
+            "xy_valid": msg.xy_valid, "z_valid": msg.z_valid,
+            "v_xy_valid": msg.v_xy_valid, "v_z_valid": msg.v_z_valid,
+            "xy_global": msg.xy_global, "z_global": msg.z_global,
+            "xy_reset_counter": msg.xy_reset_counter, "z_reset_counter": msg.z_reset_counter,
+            "vehicle_attitude_timestamp_sample_us": self.latest_attitude.timestamp_sample if self.latest_attitude else "",
+            "vehicle_odometry_timestamp_sample_us": self.latest_px4_odometry.timestamp_sample if self.latest_px4_odometry else "",
             "frame_position": "px4_local_ned",
             "frame_body": "body_frd",
             "x_ned_m": fmt_float(msg.x),
@@ -241,13 +501,21 @@ class TrajectoryLogger(Node):
         }
         self.px4_writer.writerow(row)
 
-        self._publish_px4_compare_topics(
-            position=(float(msg.x), float(msg.y), float(msg.z)),
-            velocity=(float(msg.vx), float(msg.vy), float(msg.vz)),
-            acceleration=(float(msg.ax), float(msg.ay), float(msg.az)),
-            rpy=(roll, pitch, yaw) if q is not None else None,
-            angular_velocity=angular_velocity if angular_velocity[0] != "" else None,
-        )
+        sample_time = self._accept_px4_message("local_position", msg.timestamp_sample)
+        if sample_time is None:
+            return
+        self._update_reference(msg)
+        if msg.xy_valid and msg.z_valid and self.reference is not None:
+            self._queue_px4("position", sample_time, (msg.x, msg.y, msg.z))
+        else:
+            self.pairs.pending.pop("position", None)
+        if msg.v_xy_valid and msg.v_z_valid:
+            self._queue_px4("velocity", sample_time, (msg.vx, msg.vy, msg.vz))
+            self._queue_px4("acceleration", sample_time, (msg.ax, msg.ay, msg.az))
+        else:
+            self.pairs.pending.pop("velocity", None)
+            self.pairs.pending.pop("acceleration", None)
+        self._flush_pairs()
 
     def _latest_px4_quaternion(self) -> tuple[float, float, float, float] | None:
         if self.latest_attitude is not None:
@@ -260,7 +528,8 @@ class TrajectoryLogger(Node):
         pose = msg.pose.pose
         twist = msg.twist.twist
         stamp_s = stamp_to_seconds(msg.header.stamp)
-        sample_time_s = stamp_s if stamp_s > 0.0 else self.get_clock().now().nanoseconds * 1e-9
+        # Gazebo epoch zero is valid; never substitute wall time for sim time.
+        sample_time_s = stamp_s
         if self.first_gazebo_time_s is None:
             self.first_gazebo_time_s = sample_time_s
         gazebo_elapsed_s = sample_time_s - self.first_gazebo_time_s
@@ -297,6 +566,8 @@ class TrajectoryLogger(Node):
             (wx_body_flu, wy_body_flu, wz_body_flu)
         )
         ros_time_s = self._ros_now_s()
+        if self.ros_start_time_s <= 0:
+            self.ros_start_time_s = ros_time_s
 
         row = {
             "ros_time_s": fmt_time(ros_time_s),
@@ -345,13 +616,9 @@ class TrajectoryLogger(Node):
         }
         self.truth_writer.writerow(row)
 
-        self._publish_truth_compare_topics(
-            position=(float(y_enu), float(x_enu), float(-z_enu)),
-            velocity=(vx_ned, vy_ned, vz_ned),
-            acceleration=(ax_ned, ay_ned, az_ned),
-            rpy=(roll_ned, pitch_ned, yaw_ned),
-            angular_velocity=(wx_body_frd, wy_body_frd, wz_body_frd),
-        )
+        self._queue_truth(sample_time_s, (x_enu, y_enu, z_enu), q, velocity,
+                          (wx_body_flu, wy_body_flu, wz_body_flu))
+        self._flush_pairs()
 
     def _truth_acceleration(
         self, sample_time_s: float, velocity: tuple[float, float, float]
@@ -387,99 +654,19 @@ class TrajectoryLogger(Node):
             for topic in STATE_COMPARE_TOPICS
         }
 
-    def _publish_px4_compare_topics(
-        self,
-        *,
-        position: tuple[float, float, float],
-        velocity: tuple[float, float, float],
-        acceleration: tuple[float, float, float],
-        rpy: tuple[float, float, float] | None,
-        angular_velocity: tuple[float, float, float] | None,
-    ) -> None:
-        if not self.publish_state_compare_topics:
-            return
-        values: dict[str, tuple[float, float, float]] = {
-            "position": position,
-            "velocity": velocity,
-            "acceleration": acceleration,
-        }
-        if rpy is not None:
-            values["rpy"] = rpy
-        if angular_velocity is not None:
-            values["angular_velocity"] = angular_velocity
-        for key, vector in values.items():
-            self.latest_px4_compare[key] = vector
-            self._publish_compare_vector("px4", key, vector)
-        self._publish_compare_errors()
-
-    def _publish_truth_compare_topics(
-        self,
-        *,
-        position: tuple[float, float, float],
-        velocity: tuple[float, float, float],
-        acceleration: tuple[float | str, float | str, float | str],
-        rpy: tuple[float, float, float],
-        angular_velocity: tuple[float, float, float],
-    ) -> None:
-        if not self.publish_state_compare_topics:
-            return
-        values: dict[str, tuple[float, float, float]] = {
-            "position": position,
-            "velocity": velocity,
-            "rpy": rpy,
-            "angular_velocity": angular_velocity,
-        }
-        if all(value != "" for value in acceleration):
-            values["acceleration"] = (
-                float(acceleration[0]),
-                float(acceleration[1]),
-                float(acceleration[2]),
-            )
-        else:
-            self.latest_truth_compare.pop("acceleration", None)
-        for key, vector in values.items():
-            self.latest_truth_compare[key] = vector
-            self._publish_compare_vector("truth", key, vector)
-        self._publish_compare_errors()
-
-    def _publish_compare_errors(self) -> None:
-        for key, _, _, error_topic, frame_id in STATE_COMPARE_SPECS:
-            if key not in self.latest_px4_compare or key not in self.latest_truth_compare:
-                continue
-            px4 = self.latest_px4_compare[key]
-            truth = self.latest_truth_compare[key]
-            if key == "rpy":
-                error = tuple(wrap_pi(px4[idx] - truth[idx]) for idx in range(3))
-            else:
-                error = tuple(px4[idx] - truth[idx] for idx in range(3))
-            self._publish_vector(error_topic, error, frame_id)
-
-    def _publish_compare_vector(
-        self,
-        source: str,
-        key: str,
-        vector: tuple[float, float, float],
-    ) -> None:
-        _, px4_topic, truth_topic, _, frame_id = STATE_COMPARE_BY_KEY[key]
-        if source == "px4":
-            topic_key = px4_topic
-        elif source == "truth":
-            topic_key = truth_topic
-        else:
-            raise ValueError(f"Unknown state compare source: {source}")
-        self._publish_vector(topic_key, vector, frame_id)
-
     def _publish_vector(
         self,
         topic_key: str,
         vector: tuple[float, float, float],
         frame_id: str,
+        sample_time_s: float,
     ) -> None:
         publisher = self.state_compare_publishers.get(topic_key)
         if publisher is None:
             return
         msg = Vector3Stamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        stamp_ns = round(sample_time_s * 1e9)
+        msg.header.stamp.sec, msg.header.stamp.nanosec = divmod(stamp_ns, 1_000_000_000)
         msg.header.frame_id = frame_id
         msg.vector.x = float(vector[0])
         msg.vector.y = float(vector[1])
@@ -487,10 +674,21 @@ class TrajectoryLogger(Node):
         publisher.publish(msg)
 
     def destroy_node(self) -> bool:
-        for csv_file in (self.px4_file, self.truth_file):
+        if self.control_file is not None:
+            self.control_file.close()
+        for csv_file in (self.px4_file, self.truth_file, self.compare_file):
             csv_file.flush()
             csv_file.close()
         return super().destroy_node()
+
+
+def comparison_fieldnames() -> list[str]:
+    return [
+        "sample_sim_time_s", "quantity", "truth_left_sim_time_s", "truth_right_sim_time_s",
+        "truth_bracket_s", "px4_queue_age_s", "alignment_epoch",
+        "ref_lat", "ref_lon", "ref_alt", "frame_id", "ros_publish_time_s",
+        *[f"{source}_{axis}" for source in ("px4", "truth", "error") for axis in "xyz"],
+    ]
 
 
 def px4_fieldnames() -> list[str]:
@@ -500,7 +698,10 @@ def px4_fieldnames() -> list[str]:
         "px4_time_s",
         "px4_elapsed_s",
         "px4_timestamp_us",
-        "px4_timestamp_sample_us",
+        "px4_timestamp_sample_us", "sample_sim_time_s",
+        "ref_timestamp", "ref_lat", "ref_lon", "ref_alt", "xy_global", "z_global",
+        "xy_valid", "z_valid", "v_xy_valid", "v_z_valid", "xy_reset_counter", "z_reset_counter",
+        "vehicle_attitude_timestamp_sample_us", "vehicle_odometry_timestamp_sample_us",
         "frame_position",
         "frame_body",
         "x_ned_m",

@@ -7,12 +7,12 @@ control_rate_hz: 50.0
 takeoff_warmup_s: 1.0
 entry_hold_s: 0.2
 acceptance_radius_m: 0.1
-land_at_end: true
-loop_route: false
+land_at_end: false
+loop_route: true
 yaw_mode: face_velocity
 
 curve:
-  duration_s: 40.0
+  duration_s: 20.0
   constants:
     cx: 0.0
     cy: 0.0
