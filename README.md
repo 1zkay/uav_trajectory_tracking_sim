@@ -1,6 +1,8 @@
 # UAV Trajectory Tracking Simulation
 
-PX4 SITL + Gazebo Harmonic + ROS 2 Jazzy 的本地 NED 参数化轨迹跟踪仿真工作区。当前视觉链路采用 **YOLO + BoT-SORT 目标跟踪**，云台节点负责把目标稳定到主机 `x500_0` 的相机中心；视觉拦截链路使用云台相机 LOS 和论文式 PNG 速度角更新做外层导引。
+PX4 SITL + Gazebo Harmonic + ROS 2 Jazzy 的本地 NED 参数化轨迹跟踪仿真工作区。当前视觉链路采用 **YOLO + BoT-SORT 目标跟踪**，主机 `x500_0` 使用官方 **x500_mono_cam 前向固定单目相机**。视觉链路通过相机内参、固定安装姿态和 PX4 机体姿态计算 LOS，保留现有 PNG 外层导引。
+
+云台版本已保存为 Git 标签 `archive/gimbal-20260907`；固定相机修改位于 `feat/fixed-camera` 分支。迁移依据、接口与验证见 [固定相机迁移说明](docs/fixed_camera_migration.md)。
 
 ## 环境
 
@@ -56,7 +58,7 @@ cd /home/zk/uav_trajectory_tracking_sim
 ./scripts/start_target_trajectory_tracking.sh
 ```
 
-终端 5，启动主机视觉拦截链路。该入口会启动相机桥接、YOLO + BoT-SORT、云台视觉伺服、主机 Gazebo truth 日志桥接和 `visual_pursuit_interceptor`：
+终端 5，启动主机视觉拦截链路。该入口会启动相机桥接、YOLO + BoT-SORT、固定相机目标观测、主机 Gazebo truth 日志桥接和 `visual_pursuit_interceptor`：
 
 ```bash
 cd /home/zk/uav_trajectory_tracking_sim
@@ -93,7 +95,7 @@ ws://localhost:8765
 
 第二架目标无人机按 PX4 Gazebo 官方多机方式运行：每架机一个独立 PX4 SITL 实例。
 主机使用默认实例 `px4_instance=0`、Gazebo 模型 `x500_0`、PX4 官方
-`gz_x500_gimbal` airframe、ROS 2 话题 `/fmu/...`、`MAV_SYS_ID=1`。目标机使用
+`gz_x500_mono_cam` airframe（4010）、ROS 2 话题 `/fmu/...`、`MAV_SYS_ID=1`。目标机使用
 `scripts/start_target_px4_gazebo.sh` 启动为
 `px4_instance=1`，连接 Gazebo 中预加载的 `x500_1`；PX4 会自动设置
 `MAV_SYS_ID=2`、`UXRCE_DDS_KEY=2`，ROS 2 话题带 `/px4_1/...` namespace。
@@ -129,97 +131,44 @@ TRAJECTORY_FILE=/home/zk/my_target_trajectory.yaml ./scripts/start_target_trajec
 
 Gazebo 如果暂停，点击左下角播放按钮。轨迹仿真默认使用
 `trajectory_tracking` 世界，预加载主机 `x500_0` 和目标机 `x500_1`。`x500_0` 使用本仓库的
-`x500_gimbal_trajectory_wind` 包装模型，内部使用带自机相机消隐的 `x500_gimbal_self_filtered`；
+`x500_mono_cam_trajectory_wind` 包装模型，内部直接包含官方 `x500_mono_cam`；
 `x500_1` 仍使用普通
 `x500_trajectory_wind`。两个机体都由 world 预加载，PX4 启动后分别通过
 `PX4_GZ_MODEL_NAME=x500_0` 和 `PX4_GZ_MODEL_NAME=x500_1` 连接，因此可以只在本仓库内启用
-受风模型、真值 odometry 和云台相机自机消隐，不修改 PX4 原始 `x500_base` / `x500_gimbal`。
+受风模型和真值 odometry，不修改 PX4 原始 `x500_base` / `x500_mono_cam`。固定相机使用官方渲染设置，不再应用旧云台的自机消隐。
 `default1` 保留给 `/home/zk/gimbal_track` 使用，其中仍包含 `x500_target_moving`。
 Gazebo 世界默认不插入轨迹线、边界、参照方块或风向箭头，以减少视觉识别干扰；RViz 使用 ROS ENU
 `map` 坐标显示轨迹，其中 PX4 NED 会自动转换为 `x=east, y=north, z=up`。如果需要临时查看 Gazebo 静态轨迹标记，可用 `SHOW_TRAJECTORY_VISUALS=true ./scripts/start_px4_gazebo.sh` 启动。
 Gazebo 世界坐标同样按 ENU 显示：`Gazebo x=east`、`Gazebo y=north`、`Gazebo z=up`。
 
-## 云台相机、YOLO + BoT-SORT 跟踪与云台闭环
+## 固定相机与视觉观测
 
-主机 `x500_0` 的云台相机图像按 ROS/Gazebo 官方 image bridge 接入 ROS 2：
+主机采用 PX4 官方 `x500_mono_cam`：`CameraJoint` 为 `fixed`，相机相对机体
+位姿为 `(0.12, 0.03, 0.242, 0, 0, 0)`，图像为 1280×960、30 Hz。
+Gazebo 图像及 CameraInfo 话题中的传感器仍叫 `camera`，ROS 话题保持：
 
-- Gazebo 原始话题：`/world/trajectory_tracking/model/x500_0/link/camera_link/sensor/camera/image`
-- ROS 2 图像话题：`/x500_0/camera/image_raw`
-- YOLO + BoT-SORT 跟踪结果：`/x500_0/yolo/tracks`
-- 跟踪标注图像：`/x500_0/yolo/tracks_image`
+- `/x500_0/camera/image_raw`
+- `/x500_0/camera/camera_info`
+- `/x500_0/yolo/tracks`
+- `/x500_0/yolo/tracks_image`
 
-视觉主链路为：
+视觉入口增加 `fixed_camera_target_tracker`，从实际 `CameraInfo.K` 计算目标角偏差。
+`/x500_0/fixed_camera_target_tracker/error` 的 x/y 单位为 **弧度**，正方向为图像右/下，z 为置信度。
+`tracking_active` 表示新鲜有效观测；`lock_active` 表示同一目标已连续观测达到确认时长，
+不要求目标先居中。未收到内参、观测过期或 frame 不匹配时不输出可用观测。
 
-```text
-/x500_0/camera/image_raw
-        │
-        ▼
-yolo_tracker(BoT-SORT) ──► /x500_0/yolo/tracks
-        │                              │
-        │                              ▼
-        │                 gimbal_target_tracker
-        │                    ▲         │
-        │                    │         │
-        │     /x500_0/gimbal/joint_states
-        │                              │
-        │                              ▼
-        ├────────────────► /fmu/in/gimbal_manager_set_attitude
-        └──── configure ─► /fmu/in/vehicle_command
-```
+控制器在固定模式下不订阅云台关节或搜索反馈，也不启动云台管理、伺服或性能监测节点。
+无目标时在悬停点以机体偏航搜索，观测到目标后通过 `yaw_mode: face_los` 转向目标；
+固定相机的画面会随无人机俯仰和横滚变化，不具备云台的独立稳像能力。
 
-`scripts/start_trajectory_tracking.sh` 默认启动相机桥接和 YOLO + BoT-SORT 跟踪，权重文件为仓库根目录
-`yolov8s.pt`。YOLO Python 依赖当前安装在 `/home/zk/px4-venv`，`scripts/build.sh` 会使用这个
-venv 构建 ROS 2 console scripts。
+配置文件：
 
-只需要轨迹控制、不需要视觉跟踪时：
+- `config/yolo_tracking.yaml`：检测、跟踪和推理参数。
+- `config/fixed_camera_tracking.yaml`：目标 ID/类别、置信度、超时及确认时长。
+- `config/visual_interception.yaml`：固定外参、图像观测、偏航搜索及现有导引参数。
 
-```bash
-ENABLE_YOLO_TRACKING=false ./scripts/start_trajectory_tracking.sh
-```
-
-只保留控制和日志，连相机图像桥接也关闭：
-
-```bash
-ENABLE_CAMERA_BRIDGE=false ENABLE_YOLO_TRACKING=false ./scripts/start_trajectory_tracking.sh
-```
-
-启动云台目标居中闭环：
-
-```bash
-ENABLE_GIMBAL_TRACKING=true ./scripts/start_trajectory_tracking.sh
-```
-
-默认情况下，`gimbal_target_tracker` 订阅 `GIMBAL_INPUT_TOPIC=/x500_0/yolo/tracks`、`/x500_0/camera/camera_info` 和 `/x500_0/gimbal/joint_states`，并根据跟踪框中心与相机内参计算出的视线角误差，向 `/fmu/in/gimbal_manager_set_attitude` 发布 PX4 gimbal manager 高频姿态 setpoint；`/x500_0/gimbal/joint_states` 是 Gazebo 云台关节反馈。`/fmu/in/vehicle_command` 用于 gimbal manager 配置和兼容回退，配置命令会重试直到 PX4 ACK。详细说明见 `docs/gimbal_target_tracking.md`。
-
-云台节点同时发布两类状态：`tracking_active` 表示有新鲜目标检测/跟踪，`lock_active` 表示目标已经居中且残差稳定，外层导引可以使用。`lock_active` 由 yaw/pitch 图像误差、残差角速度、云台滞后状态和进入/退出滞回共同决定。
-
-视觉拦截节点 `visual_pursuit_interceptor` 只在 `lock_active` 和云台图像误差新鲜时进入 `pursuit`。节点对 `/x500_0/gimbal_target_tracker/error` 做 DKF 延迟补偿，再用云台关节角构造视觉 LOS，按《Precise Interception Flight Targets by Image-based Visual Servoing of Multicopter》的 PNG 速度角更新生成 PX4 NED velocity/acceleration setpoint。详细说明见 `docs/visual_pursuit_interception.md`。
-
-查看带 BoT-SORT 跟踪标签的相机窗口时，`rqt_image_view` 终端不要激活 `/home/zk/px4-venv`，
-否则可能找不到系统 PyQt5：
-
-```bash
-deactivate
-source /opt/ros/jazzy/setup.bash
-source /home/zk/uav_trajectory_tracking_sim/install/setup.bash
-ros2 run rqt_image_view rqt_image_view /x500_0/yolo/tracks_image
-```
-
-手动执行 `ros2 topic echo`、`ros2 interface show` 等检查命令时，每个新终端都要先加载本工作区：
-
-```bash
-cd /home/zk/uav_trajectory_tracking_sim
-source /opt/ros/jazzy/setup.bash
-source install/setup.bash
-```
-
-如果 PX4 相关 topic 提示 `px4_msgs` 消息类型无效，通常就是当前终端没有加载本工作区的 `px4_msgs`，或者 ROS daemon 还缓存着旧环境；执行 `ros2 daemon stop && ros2 daemon start` 后再试。
-
-视觉链路常用配置文件：
-
-- `src/uav_trajectory_tracking/config/yolo_tracking.yaml`: YOLO/BoT-SORT 参数，例如 `tracker_config`、`confidence_threshold`、`iou_threshold`、`image_size`、`max_inference_hz`、`classes`、`device`。
-- `src/uav_trajectory_tracking/config/gimbal_tracking.yaml`: 云台视觉伺服参数，例如 `target_class_id`、`target_track_id`、`lock_target_track`、`min_score`、`fallback_fx_px`、`fallback_fy_px`、`deadband_angle_deg`、`yaw_kp_s_inv`、`pitch_kp_s_inv`、`lock_yaw_error_deg`、`unlock_yaw_error_deg`、`lock_residual_error_rate_deg_s`、`unlock_residual_error_rate_deg_s`、`search_enabled`、`search_yaw_rate_deg_s`、`search_active_topic`、`command_interface`、`gimbal_yaw_joint_name`、`gimbal_pitch_joint_name`。
-- `src/uav_trajectory_tracking/config/visual_interception.yaml`: 视觉拦截参数，例如 `png_vertical_gain`、`png_horizontal_gain`、`pursuit_speed_mps`、`max_guidance_accel_mps2`、`visual_error_timeout_s`、`dkf_measurement_delay_s`、`lock_loss_grace_s`、`coast_velocity_decay_s`、`search_vertical_motion_enabled`、`search_vertical_amplitude_m`、`yaw_mode` 和相机/云台光轴运动学常量。
+以上路径相对 `src/uav_trajectory_tracking/`。可使用 `FIXED_CAMERA_CONFIG_FILE` 覆盖观测参数文件。
+普通轨迹入口保留旧云台选项供旧模型使用，但默认关闭；当前固定机型不要启用它们。
 
 ## 风场
 
@@ -270,7 +219,7 @@ WIND_FILE=/home/zk/uav_trajectory_tracking_sim/src/uav_trajectory_tracking/confi
 - `gazebo_truth.csv`: Gazebo 物理真值 odometry，位置原始坐标系为 Gazebo ENU，twist 原始坐标系为
   `child_frame_id` 对应的 body FLU，同时写入 PX4 可比的 NED/FRD 等效列。
 
-真值日志由 `x500_gimbal_trajectory_wind` 内的 Gazebo `OdometryPublisher` 发布
+真值日志由 `x500_mono_cam_trajectory_wind` 内的 Gazebo `OdometryPublisher` 发布
 `/model/x500_0/odometry_with_covariance`，再通过 `ros_gz_bridge` 桥接到 ROS 2。PX4 估计日志订阅
 `/fmu/out/vehicle_local_position_v1`、`/fmu/out/vehicle_attitude` 和
 `/fmu/out/vehicle_odometry`。Gazebo 真值 CSV 中的速度会先由 body FLU 旋转到 NED，
@@ -333,7 +282,7 @@ PUBLISH_STATE_COMPARE_TOPICS=false ./scripts/start_visual_interception.sh
 - `/x500_0/state_compare/angular_velocity_error_body_frd`: 主机角速度误差，`PX4 - truth`。
 - `/fmu/in/offboard_control_mode`: 主机 PX4 Offboard 控制模式输入。
 - `/fmu/in/trajectory_setpoint`: 主机 PX4 轨迹/速度 setpoint 输入，轨迹跟踪或视觉拦截控制器会发布到这里。
-- `/fmu/in/vehicle_command`: 主机 PX4 MAVLink 命令输入，例如切模式、解锁、降落和云台配置。
+- `/fmu/in/vehicle_command`: 主机 PX4 MAVLink 命令输入，例如切模式、解锁、降落。
 - `/fmu/out/vehicle_command_ack_v1`: 主机 PX4 命令 ACK 输出。
 - `/px4_1/fmu/out/vehicle_status_v4`: 目标机 PX4 状态。
 - `/px4_1/fmu/out/vehicle_local_position_v1`: 目标机 PX4 EKF 本地位置/速度/加速度估计。
@@ -343,19 +292,14 @@ PUBLISH_STATE_COMPARE_TOPICS=false ./scripts/start_visual_interception.sh
 - `/trajectory_path`: YAML 参数化曲线采样得到的规划轨迹。
 - `/vehicle_path`: 飞行过程中累积的实际轨迹。
 - `/trajectory_tracker/current_stage`: 当前轨迹阶段，`0=entry`、`1=trajectory`、`2=return`、`3=finished`。
-- `/x500_0/camera/image_raw`: 主机云台相机原始图像。
-- `/x500_0/camera/camera_info`: 主机云台相机内参。
+- `/x500_0/camera/image_raw`: 主机固定相机原始图像。
+- `/x500_0/camera/camera_info`: 主机固定相机内参。
 - `/x500_0/yolo/tracks`: YOLO + BoT-SORT 跟踪框，类型为 `vision_msgs/Detection2DArray`，其中 `Detection2D.id` 是跨帧 track id。
 - `/x500_0/yolo/tracks_image`: YOLO + BoT-SORT 标注后的图像。
-- `/x500_0/gimbal/joint_states`: Gazebo 云台关节反馈，`gimbal_target_tracker` 用它计算 `actual_yaw/actual_pitch`。
-- `/x500_0/gimbal_target_tracker/error`: 原始图像视线角误差，`vector.x/y` 分别为 yaw/pitch 角误差，单位为 degree；`header.stamp` 优先为选中检测的 ROS 域测量时间戳，云台控制内部仍可使用死区。
-- `/x500_0/gimbal_target_tracker/residual_error_rate`: 云台残余图像误差角速度，`x/y` 为 yaw/pitch 残差角速度，单位为 degree/s，`z` 为 `0..1` 锁定质量。
-- `/x500_0/gimbal_target_tracker/tracking_active`: 云台节点是否收到新鲜目标跟踪结果。
-- `/x500_0/gimbal_target_tracker/lock_active`: 目标是否居中且稳定到足以作为外层导引门控。
-- `/x500_0/gimbal_target_tracker/search_active`: 云台节点是否正在执行 `local_search` 或 `global_search`，视觉拦截节点用它触发无人机垂直搜索。
-- `/x500_0/gimbal_target_tracker/state`: 云台控制诊断，包含状态机状态、`cmd_yaw/cmd_pitch`、`actual_yaw/actual_pitch`、锁定阈值、残差角速度、积分项、反馈年龄和搜索状态。
-- `/fmu/in/gimbal_manager_set_attitude`: 云台高频姿态 setpoint，类型为 `px4_msgs/msg/GimbalManagerSetAttitude`。
-- `/x500_0/visual_pursuit_interceptor/diagnostics`: 视觉拦截诊断，包含 `state`、`pursuing`、`velocity_control_active`、`visual_error_fresh`、`dkf_*`、`closing_speed_mps`、`visual_los_ned_*`、`los_rate_*`、云台搜索/垂直搜索状态和输出速度。
+- `/x500_0/fixed_camera_target_tracker/error`：图像右/下角误差（rad）及置信度，保留观测时间戳。
+- `/x500_0/fixed_camera_target_tracker/tracking_active`：有新鲜有效目标观测。
+- `/x500_0/fixed_camera_target_tracker/lock_active`：同一目标连续确认完成。
+- `/x500_0/visual_pursuit_interceptor/diagnostics`: 视觉拦截诊断，包含 `state`、`pursuing`、`velocity_control_active`、`visual_error_fresh`、`dkf_*`、`closing_speed_mps`、`visual_los_ned_*`、`los_rate_*`、相机安装模式和输出速度。
 - `/target/trajectory_markers`: 目标无人机轨迹可视化。
 - `/target/trajectory_path`: 目标无人机规划路径。
 - `/target/vehicle_path`: 目标无人机实际轨迹。
@@ -387,41 +331,18 @@ ros2 topic echo /x500_0/yolo/tracks --once
 - `confidence_threshold` 是否过高。
 - 相机图像桥接是否开启：`ENABLE_CAMERA_BRIDGE=true`。
 
-如果云台不跟踪，检查：
+如果视觉链路不进入 `pursuit`，检查：
 
 ```bash
-ros2 topic echo /x500_0/gimbal_target_tracker/error --once
-ros2 topic echo /x500_0/gimbal_target_tracker/tracking_active --once
-ros2 topic echo /x500_0/gimbal_target_tracker/lock_active --once
-ros2 topic echo /x500_0/gimbal_target_tracker/state --once
-ros2 topic echo /x500_0/gimbal/joint_states --once
-ros2 topic echo /fmu/in/gimbal_manager_set_attitude --once
-```
-
-并确认：
-
-- `ENABLE_GIMBAL_TRACKING=true`。
-- `GIMBAL_INPUT_TOPIC` 与 `YOLO_TRACKS_TOPIC` 一致。
-- `/x500_0/gimbal/joint_states` 有 `cgo3_vertical_arm_joint` 和 `cgo3_camera_joint` 关节反馈；如果没有该 topic，需要重启 `scripts/start_px4_gazebo.sh`，让 Gazebo 加载本仓库云台模型中的 `JointStatePublisher` 插件。
-- `/fmu/in/gimbal_manager_set_attitude` 有持续 setpoint；如果没有该 topic，确认 `/home/zk/PX4-Autopilot/src/modules/uxrce_dds_client/dds_topics.yaml` 已包含 `/fmu/in/gimbal_manager_set_attitude`，然后重新启动 `scripts/start_px4_gazebo.sh` 让 PX4 重新生成 XRCE-DDS topic。
-- `src/uav_trajectory_tracking/config/gimbal_tracking.yaml` 中的 `target_class_id`、`target_track_id`、`min_score`、bbox 尺寸过滤阈值是否合理。
-- 云台方向反了时，修改 `yaw_error_sign` 或 `pitch_error_sign`。
-- 目标稳定偏离画面中心时，可小幅增加 `yaw_ki_s_inv2` 或 `pitch_ki_s_inv2`；出现慢速漂移时先确认 `*_feedforward_deg_s` 是否为 0。
-
-如果视觉拦截不进入 `pursuit`，检查：
-
-```bash
-ros2 topic echo /x500_0/gimbal_target_tracker/lock_active --once
-ros2 topic echo /x500_0/gimbal_target_tracker/error --once
+ros2 topic echo /x500_0/fixed_camera_target_tracker/lock_active --once
+ros2 topic echo /x500_0/fixed_camera_target_tracker/error --once
 ros2 topic echo /x500_0/visual_pursuit_interceptor/diagnostics --once
 ```
 
-并确认：
-
-- `start_visual_interception.sh` 已启动，且 `GIMBAL_ERROR_TOPIC` 与云台节点的 `error_topic` 一致。
-- `visual_interception.yaml` 中 `/x500_0/gimbal_target_tracker/error` 必须新鲜；诊断里的 `visual_error_fresh` 应为 `true`。
-- `lock_active=false` 时先看 `/x500_0/gimbal_target_tracker/state` 里的 `last_image_yaw_error_deg`、`last_image_pitch_error_deg`、`lock_centered` 和 `lock_residual_rate_ok`。
-- 短暂掉锁时状态应进入 `coast_on_lock_loss`，继续发布 velocity setpoint 衰减速度；只有长时间丢锁才切 position hold。
+确认 CameraInfo 为 1280×960、fx/fy 有效，观测与内参 frame 一致，
+`camera_mount=fixed`、`visual_error_fresh=true`。检测需连续满足
+`fixed_camera_tracking.yaml` 的 `lock_confirm_s`，且推理延迟小于 `observation_timeout_s`。
+短暂掉锁保留原 `coast_on_lock_loss` 衰减行为，超时后悬停并转向搜索。
 
 ## World 文件说明
 
@@ -432,7 +353,7 @@ ros2 topic echo /x500_0/visual_pursuit_interceptor/diagnostics --once
 安全检查失败或起飞后高度估计发散。修改世界文件后必须重启 PX4/Gazebo。
 
 本仓库的 `px4_overlays/worlds/trajectory_tracking.sdf` 是基础世界，只放 Gazebo/PX4
-必须的物理、传感器、地面、云台主机 `x500_0`、普通目标机 `x500_1` 和地理基准；
+必须的物理、传感器、地面、固定相机主机 `x500_0`、普通目标机 `x500_1` 和地理基准；
 轨迹线、起降垫、边界和初始风向箭头只在传入 `SHOW_TRAJECTORY_VISUALS=true` 时由
 `scripts/render_trajectory_world.py` 渲染到
 `build/generated/worlds/trajectory_tracking.sdf`，再由 `scripts/start_px4_gazebo.sh`

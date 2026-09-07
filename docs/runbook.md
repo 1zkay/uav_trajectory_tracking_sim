@@ -22,7 +22,7 @@ ros2 topic echo /trajectory_path --once
 正常轨迹应先进入 `entry`，到达曲线起点并稳定后再进入 `trajectory`。当前默认主机轨迹是
 `trajectory_hold.yaml` 的 `(0, 0, -5)` 悬停点；切换到 `trajectory_figure8.yaml` 后可用同一阶段逻辑检查 8 字轨迹。
 
-主机云台相机和 YOLO 检测启动后：
+主机固定相机和 YOLO 检测启动后：
 
 ```bash
 ros2 topic list | rg 'x500_0/(camera|yolo)'
@@ -41,8 +41,8 @@ RViz 使用 `map` 作为固定坐标系。`trajectory_visualizer` 会把 PX4 本
 所以 RViz 中高度向上。Gazebo 世界坐标也是 ENU，临时启用的 3D 轨迹标记使用
 `Gazebo x=east=NED y`、`Gazebo y=north=NED x`、`Gazebo z=up=-NED z`。
 
-`x500_0` 是带云台相机的主机，Gazebo 模型名仍保持 `x500_0`，底层使用本仓库的
-`x500_gimbal_self_filtered` 自机消隐模型。PX4 0 由 `scripts/start_px4_gazebo.sh` 以 `gz_x500_gimbal` airframe 启动；
+`x500_0` 是带前向固定相机的主机，底层使用官方 `x500_mono_cam`。
+PX4 0 由 `scripts/start_px4_gazebo.sh` 以 `gz_x500_mono_cam` / 4010 启动；
 目标机 `x500_1` 继续使用普通 `gz_x500` / `PX4_SYS_AUTOSTART=4001`。
 
 Gazebo 静态标记不需要手工改 world。主机启动脚本默认轨迹改
@@ -75,13 +75,13 @@ TRAJECTORY_FILE=/home/zk/my_target_trajectory.yaml ./scripts/start_target_trajec
 ./scripts/start_visual_interception.sh
 ```
 
-它会启动相机桥接、YOLO + BoT-SORT、云台视觉伺服、主机 truth 日志桥接和 `visual_pursuit_interceptor`。视觉拦截时不要同时运行主机 `start_trajectory_tracking.sh`，否则两个节点会同时向 `/fmu/in/trajectory_setpoint` 发布 setpoint。启动后检查：
+它会启动相机桥接、YOLO + BoT-SORT、固定相机目标观测、主机 truth 日志桥接和 `visual_pursuit_interceptor`。视觉拦截时不要同时运行主机 `start_trajectory_tracking.sh`，否则两个节点会同时向 `/fmu/in/trajectory_setpoint` 发布 setpoint。启动后检查：
 
 ```bash
-ros2 topic list | rg 'gimbal_target_tracker|visual_pursuit'
-ros2 topic echo /x500_0/gimbal_target_tracker/tracking_active --once
-ros2 topic echo /x500_0/gimbal_target_tracker/lock_active --once
-ros2 topic echo /x500_0/gimbal_target_tracker/error --once
+ros2 topic list | rg 'fixed_camera_target_tracker|visual_pursuit'
+ros2 topic echo /x500_0/fixed_camera_target_tracker/tracking_active --once
+ros2 topic echo /x500_0/fixed_camera_target_tracker/lock_active --once
+ros2 topic echo /x500_0/fixed_camera_target_tracker/error --once
 ros2 topic echo /x500_0/visual_pursuit_interceptor/diagnostics --once
 ```
 
@@ -95,7 +95,7 @@ lock_active: true
 visual_error_fresh: true
 ```
 
-短暂掉锁时应进入 `coast_on_lock_loss` 并继续 velocity control；如果直接 `target_lost` 或 position hold，优先检查 `lock_loss_grace_s`、`/x500_0/gimbal_target_tracker/error` 是否新鲜，以及云台端 `lock_active` 是否在阈值边缘抖动。
+短暂掉锁时应进入 `coast_on_lock_loss` 并继续 velocity control；如果直接 `target_lost` 或 position hold，优先检查 `lock_loss_grace_s`、`/x500_0/fixed_camera_target_tracker/error` 是否新鲜，以及固定相机观测是否连续满足确认时长。
 
 ## 常见问题
 
@@ -122,7 +122,7 @@ Gazebo 的 3D 标记由脚本自动完成 NED 到 Gazebo 坐标的转换，不�
 确认轨迹仿真启动脚本使用的是 `trajectory_tracking` 世界，而不是 `/home/zk/gimbal_track`
 依赖的 `default1` 世界。`trajectory_tracking.sdf` 需要加载 `gz-sim-navsat-system`
 和 `gz-sim-magnetometer-system`，并且不包含 `x500_target_moving`。`x500_0` 应包含
-`x500_gimbal_trajectory_wind`，`x500_1` 应包含 `x500_trajectory_wind`。同时必须包含
+`x500_mono_cam_trajectory_wind`，`x500_1` 应包含 `x500_trajectory_wind`。同时必须包含
 `spherical_coordinates`，这是 NavSat/GNSS 和 Gazebo 磁场模型生成有效量测的基准。
 如果 `/fmu/out/vehicle_local_position_v1` 里 `xy_valid: false`，PX4 没有可用水平位置估计，
 Offboard 轨迹仿真不会起飞。若 `estimator_status_flags` 里 `cs_mag_field_disturbed: true`，

@@ -214,7 +214,7 @@ class ImageErrorDelayedKalmanFilter:
 
 
 class VisualPursuitInterceptor(Node):
-    """Intercept using gimbal lock as seeker input and image-based PNG guidance."""
+    """Use calibrated camera observations and PX4 attitude for visual guidance."""
 
     def __init__(self) -> None:
         super().__init__("visual_pursuit_interceptor")
@@ -224,13 +224,13 @@ class VisualPursuitInterceptor(Node):
         self.declare_parameter("vehicle_local_position_topic", "/fmu/out/vehicle_local_position_v1")
         self.declare_parameter("vehicle_attitude_topic", "/fmu/out/vehicle_attitude")
         self.declare_parameter("gimbal_joint_state_topic", "/x500_0/gimbal/joint_states")
-        self.declare_parameter("gimbal_error_topic", "/x500_0/gimbal_target_tracker/error")
+        self.declare_parameter("visual_error_topic", "/x500_0/fixed_camera_target_tracker/error")
         self.declare_parameter(
             "gimbal_search_active_topic",
             "/x500_0/gimbal_target_tracker/search_active",
         )
-        self.declare_parameter("tracking_active_topic", "/x500_0/gimbal_target_tracker/tracking_active")
-        self.declare_parameter("lock_active_topic", "/x500_0/gimbal_target_tracker/lock_active")
+        self.declare_parameter("tracking_active_topic", "/x500_0/fixed_camera_target_tracker/tracking_active")
+        self.declare_parameter("lock_active_topic", "/x500_0/fixed_camera_target_tracker/lock_active")
         self.declare_parameter("offboard_control_mode_topic", "/fmu/in/offboard_control_mode")
         self.declare_parameter("trajectory_setpoint_topic", "/fmu/in/trajectory_setpoint")
         self.declare_parameter("vehicle_command_topic", "/fmu/in/vehicle_command")
@@ -241,6 +241,19 @@ class VisualPursuitInterceptor(Node):
         self.declare_parameter("source_component", 1)
 
         config = self._load_config()
+        self.camera_mount = str(config.get("camera_mount", "fixed"))
+        if self.camera_mount not in {"fixed", "gimbal"}:
+            raise ValueError("camera_mount must be fixed or gimbal")
+        self.fixed_camera = self.camera_mount == "fixed"
+        self.camera_mount_rpy_rad = parse_point(
+            config.get("camera_mount_rpy_rad", [0.0, 0.0, 0.0]),
+            "camera_mount_rpy_rad",
+        )
+        self.search_yaw_rate_rad_s = math.radians(nonnegative_float(
+            config.get("search_yaw_rate_deg_s", 20.0), "search_yaw_rate_deg_s"
+        ))
+        self.search_yaw_rad: float | None = None
+        self.last_search_yaw_time_s: float | None = None
         self.control_rate_hz = positive_float(
             config.get("control_rate_hz", 20.0),
             "control_rate_hz",
@@ -522,24 +535,26 @@ class VisualPursuitInterceptor(Node):
             self._vehicle_attitude_callback,
             px4_qos,
         )
-        self.create_subscription(
-            JointState,
-            str(self.get_parameter("gimbal_joint_state_topic").value),
-            self._gimbal_joint_state_callback,
-            sensor_qos,
-        )
+        if not self.fixed_camera:
+            self.create_subscription(
+                JointState,
+                str(self.get_parameter("gimbal_joint_state_topic").value),
+                self._gimbal_joint_state_callback,
+                sensor_qos,
+            )
         self.create_subscription(
             Vector3Stamped,
-            str(self.get_parameter("gimbal_error_topic").value),
-            self._gimbal_error_callback,
+            str(self.get_parameter("visual_error_topic").value),
+            self._visual_error_callback,
             sensor_qos,
         )
-        self.create_subscription(
-            Bool,
-            str(self.get_parameter("gimbal_search_active_topic").value),
-            self._gimbal_search_active_callback,
-            10,
-        )
+        if not self.fixed_camera:
+            self.create_subscription(
+                Bool,
+                str(self.get_parameter("gimbal_search_active_topic").value),
+                self._gimbal_search_active_callback,
+                10,
+            )
         self.create_subscription(
             Bool,
             str(self.get_parameter("tracking_active_topic").value),
@@ -568,8 +583,7 @@ class VisualPursuitInterceptor(Node):
             f"png_gains=({self.png_vertical_gain:.2f}, {self.png_horizontal_gain:.2f}), "
             f"dkf_enabled={self.dkf_enabled}, "
             f"dkf_delay={self.dkf_measurement_delay_s:.3f} s, "
-            f"gimbal_joints=({self.gimbal_yaw_joint_name}, {self.gimbal_pitch_joint_name}), "
-            f"roll_joint={self.gimbal_roll_joint_name}, "
+            f"camera_mount={self.camera_mount}, "
             f"vertical_search={self.search_vertical_motion_enabled}, "
             f"target_system={self.target_system}"
         )
@@ -601,7 +615,7 @@ class VisualPursuitInterceptor(Node):
     def _vehicle_attitude_callback(self, msg: VehicleAttitude) -> None:
         self.vehicle_attitude = msg
 
-    def _gimbal_error_callback(self, msg: Vector3Stamped) -> None:
+    def _visual_error_callback(self, msg: Vector3Stamped) -> None:
         now_s = self._now_s()
         if (
             self.last_visual_error_time_s is not None
@@ -609,12 +623,13 @@ class VisualPursuitInterceptor(Node):
         ):
             self._reset_image_error_dkf()
 
-        self.image_yaw_error_rad = math.radians(
-            self.visual_error_yaw_sign * float(msg.vector.x)
-        )
-        self.image_pitch_error_rad = math.radians(
-            self.visual_error_pitch_sign * float(msg.vector.y)
-        )
+        if not all(math.isfinite(value) for value in (msg.vector.x, msg.vector.y, msg.vector.z)):
+            return
+        # The fixed-camera observation contract uses SI radians. Legacy gimbal
+        # observations used degrees and retain that conversion only in gimbal mode.
+        units = 1.0 if self.fixed_camera else math.pi / 180.0
+        self.image_yaw_error_rad = units * self.visual_error_yaw_sign * float(msg.vector.x)
+        self.image_pitch_error_rad = units * self.visual_error_pitch_sign * float(msg.vector.y)
         self.image_error_score = float(msg.vector.z)
         self.last_visual_error_time_s = now_s
         if self.dkf_enabled:
@@ -748,7 +763,7 @@ class VisualPursuitInterceptor(Node):
                 self.state = InterceptorState.HOLD
             return False
 
-        if not self._fresh_gimbal_feedback(now_s):
+        if not self.fixed_camera and not self._fresh_gimbal_feedback(now_s):
             self._capture_loss_hold_position_if_needed()
             self.state = InterceptorState.TARGET_LOST
             return False
@@ -936,23 +951,24 @@ class VisualPursuitInterceptor(Node):
     def _publish_pursuit_setpoint(self, now_us: int, dt_s: float) -> None:
         assert self.vehicle_local_position is not None
         assert self.vehicle_attitude is not None
-        assert self.gimbal_yaw_rad is not None
-        assert self.gimbal_pitch_rad is not None
-        assert self.gimbal_roll_rad is not None
+        if not self.fixed_camera:
+            assert self.gimbal_yaw_rad is not None
+            assert self.gimbal_pitch_rad is not None
+            assert self.gimbal_roll_rad is not None
 
-        gimbal_los_body = gimbal_angles_to_body_los(
-            self.gimbal_yaw_rad,
-            self.gimbal_roll_rad,
-            self.gimbal_pitch_rad,
-            self.gimbal_kinematics,
-        )
-        gimbal_los_ned = normalize(
-            rotate_body_to_ned(
-                tuple(float(value) for value in self.vehicle_attitude.q),
-                gimbal_los_body,
+            gimbal_los_body = gimbal_angles_to_body_los(
+                self.gimbal_yaw_rad,
+                self.gimbal_roll_rad,
+                self.gimbal_pitch_rad,
+                self.gimbal_kinematics,
             )
-        )
-        self.last_gimbal_los_ned = gimbal_los_ned
+            gimbal_los_ned = normalize(
+                rotate_body_to_ned(
+                    tuple(float(value) for value in self.vehicle_attitude.q),
+                    gimbal_los_body,
+                )
+            )
+            self.last_gimbal_los_ned = gimbal_los_ned
 
         visual_los_body = self._visual_los_body(now_us * 1e-6)
         guidance_los_ned = normalize(
@@ -1019,6 +1035,11 @@ class VisualPursuitInterceptor(Node):
         self.last_velocity_setpoint_ned = velocity_setpoint_ned
 
     def _visual_los_body(self, now_s: float) -> Vector3:
+        if self.fixed_camera:
+            yaw_error_rad, pitch_error_rad = self._guidance_image_error(now_s)
+            return fixed_camera_image_error_to_body_los(
+                yaw_error_rad, pitch_error_rad, self.camera_mount_rpy_rad
+            )
         assert self.gimbal_yaw_rad is not None
         assert self.gimbal_pitch_rad is not None
         assert self.gimbal_roll_rad is not None
@@ -1237,6 +1258,8 @@ class VisualPursuitInterceptor(Node):
         self.last_png_desired_horizontal_angle_rad = None
 
     def _vertical_search_active(self, now_s: float) -> bool:
+        if self.fixed_camera:
+            return False
         if not self.search_vertical_motion_enabled:
             return False
         if self.search_vertical_amplitude_m <= 0.0:
@@ -1343,6 +1366,28 @@ class VisualPursuitInterceptor(Node):
         msg.jerk = [math.nan, math.nan, math.nan]
         msg.yaw = self._yaw_from_los(self.last_los_ned)
         msg.yawspeed = math.nan
+        if self.fixed_camera and self.initial_hover_reached:
+            now_s = now_us * 1e-6
+            if self._fresh_visual_error(now_s) and self.vehicle_attitude is not None:
+                self.last_los_ned = rotate_body_to_ned(
+                    tuple(float(value) for value in self.vehicle_attitude.q),
+                    self._visual_los_body(now_s),
+                )
+                msg.yaw = self._yaw_from_los(self.last_los_ned)
+                self.search_yaw_rad = msg.yaw
+            elif self.vehicle_attitude is not None:
+                if (self.search_yaw_rad is None or self.last_search_yaw_time_s is None
+                        or now_s - self.last_search_yaw_time_s > 0.25):
+                    forward = rotate_body_to_ned(tuple(self.vehicle_attitude.q), (1.0, 0.0, 0.0))
+                    self.search_yaw_rad = math.atan2(forward[1], forward[0])
+                dt_s = (0.0 if self.last_search_yaw_time_s is None else
+                        clamp(now_s - self.last_search_yaw_time_s, 0.0, 0.25))
+                self.search_yaw_rad = wrap_angle_rad(
+                    self.search_yaw_rad + self.search_yaw_rate_rad_s * dt_s
+                )
+                msg.yaw = self.search_yaw_rad
+                msg.yawspeed = self.search_yaw_rate_rad_s
+            self.last_search_yaw_time_s = now_s
         msg.timestamp = now_us
         self.trajectory_pub.publish(msg)
 
@@ -1463,6 +1508,7 @@ class VisualPursuitInterceptor(Node):
             diagnostic_value("hold_z_m", point_value(self.hold_position, 2)),
             diagnostic_value("detection_active", self.tracking_active),
             diagnostic_value("lock_active", self.lock_active),
+            diagnostic_value("camera_mount", self.camera_mount),
             diagnostic_value("gimbal_search_active", self.gimbal_search_active),
             diagnostic_value(
                 "gimbal_search_active_age_s",
@@ -1669,6 +1715,22 @@ class VisualPursuitInterceptor(Node):
         if self.last_visual_error_time_s is None:
             return None
         return max(0.0, now_s - self.last_visual_error_time_s)
+
+
+def fixed_camera_image_error_to_body_los(
+    image_right_rad: float,
+    image_down_rad: float,
+    mount_rpy_flu: Vector3 = (0.0, 0.0, 0.0),
+) -> Vector3:
+    """Pinhole ray: optical (right, down, forward) -> Gazebo FLU -> PX4 FRD.
+
+    The fixed translation affects camera origin, not the direction of the ray;
+    no monocular target range is inferred here.
+    """
+    ray_flu = (1.0, -math.tan(image_right_rad), -math.tan(image_down_rad))
+    return normalize(gazebo_flu_to_px4_frd(
+        matvec3(rotation_from_rpy(*mount_rpy_flu), ray_flu)
+    ))
 
 
 def gimbal_angles_to_body_los(

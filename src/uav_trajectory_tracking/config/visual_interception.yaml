@@ -1,9 +1,10 @@
-# Host UAV visual interception in PX4 local NED.
-# The gimbal tracker acts as the seeker inner loop. After seeker lock, the
-# interceptor follows the image-based PNG velocity-angle update from
-# "Precise Interception Flight Targets by Image-based Visual Servoing of
-# Multicopter", adapted to the gimbal camera LOS.
+# Fixed forward monocular camera, using the official x500_mono_cam mounting.
 frame: NED
+camera_mount: fixed
+# Fixed camera rotation in Gazebo body FLU, matching CameraJoint in upstream SDF.
+camera_mount_rpy_rad: [0.0, 0.0, 0.0]
+# Scan vehicle yaw at the hover point when no target is visible.
+search_yaw_rate_deg_s: 20.0
 
 control_rate_hz: 30.0
 takeoff_warmup_s: 1.0
@@ -19,13 +20,13 @@ png_vertical_gain: 3.5
 png_horizontal_gain: 3.5
 max_guidance_accel_mps2: 2.0
 visual_error_timeout_s: 0.2
-# gimbal_target_tracker reports pixel-space angular errors:
+# fixed_camera_target_tracker reports image angular errors in radians:
 # +yaw means target appears right in the image, +pitch means target appears lower.
-# Convert those image signs into the Gazebo FLU / PX4 FRD camera ray convention.
-visual_error_yaw_sign: -1.0
-visual_error_pitch_sign: -1.0
+# The fixed-camera projection converts optical right/down directly to body FRD.
+visual_error_yaw_sign: 1.0
+visual_error_pitch_sign: 1.0
 # Delayed Kalman filter on the signed yaw/pitch image residuals. The interceptor
-# first uses /gimbal_target_tracker/error.header.stamp as the measurement time.
+# first uses /fixed_camera_target_tracker/error.header.stamp as the measurement time.
 # The YOLO tracker re-stamps detections at image receipt with the ROS/PX4
 # control clock, so the interceptor never estimates a Gazebo-to-ROS clock offset.
 # This fixed delay is only the fallback when a measurement has no stamp. A
@@ -39,39 +40,11 @@ min_velocity_direction_mps: 0.2
 los_rate_filter_alpha: 0.35
 coast_velocity_decay_s: 0.5
 
-# The gimbal tracker performs seeker-lock confirmation; the interceptor only
-# adds loss grace to avoid switching PX4 control modes on short lock dips.
+# Confirmed fresh observations gate guidance; a fixed camera need not center
+# the target before starting. Retain the existing outer-loop loss grace.
 lock_loss_grace_s: 0.4
 tracking_active_timeout_s: 0.2
 lock_active_timeout_s: 0.2
-gimbal_feedback_timeout_s: 2.0
 hold_position_on_loss: true
-# When the gimbal tracker enters local/global search, keep XY fixed but scan
-# altitude so the target can re-enter the camera FOV when pitch alone is not
-# enough. Values are PX4 local NED: more negative z means higher altitude.
-search_vertical_motion_enabled: true
-search_vertical_amplitude_m: 2.0
-search_vertical_period_s: 12.0
-search_vertical_state_timeout_s: 0.5
-search_vertical_min_z_ned: -8.0
-search_vertical_max_z_ned: -2.0
-yaw_mode: fixed_north
-
-gimbal_yaw_joint_name: cgo3_vertical_arm_joint
-gimbal_pitch_joint_name: cgo3_camera_joint
-gimbal_roll_joint_name: cgo3_horizontal_arm_joint
-gimbal_yaw_sign: 1.0
-gimbal_pitch_sign: 1.0
-gimbal_roll_sign: 1.0
-
-# Camera optical-axis kinematics, matching px4_overlays/models/* SDF:
-# - PX4 body frame is FRD; Gazebo model/link frame is FLU.
-# - x500_gimbal_self_filtered mounts gimbal_self_hidden with yaw=pi.
-# - Gazebo rendering camera sensors use +X as the forward/boresight axis.
-# - The camera sensor pose under camera_link has yaw=pi.
-gimbal_mount_rpy_rad: [0.0, 0.0, 3.141592653589793]
-gimbal_yaw_axis: [0.0, 0.0, -1.0]
-gimbal_roll_axis: [-1.0, 0.0, 0.0]
-gimbal_pitch_axis: [0.0, 1.0, 0.0]
-camera_sensor_rpy_rad: [0.0, 0.0, 3.141592653589793]
-camera_optical_axis_sensor: [1.0, 0.0, 0.0]
+search_vertical_motion_enabled: false
+yaw_mode: face_los

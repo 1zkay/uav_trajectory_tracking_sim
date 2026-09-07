@@ -1,5 +1,7 @@
 # Visual Pursuit Interception
 
+> **历史云台版本说明**：本文对应 Git 标签 `archive/gimbal-20260907`。当前机型已切换为固定相机，当前硬件、视觉接口和启动方式以 [固定相机迁移说明](fixed_camera_migration.md) 与 README 为准；下文云台参数及启动命令不适用于当前默认入口。
+
 本文档说明当前 `visual_pursuit_interceptor` 的实际实现。云台视觉伺服提供导引头锁定和图像角误差，拦截器用云台关节角加残余图像角构造视觉 LOS，并按
 `articles/Precise Interception Flight Targets by Image-based Visual Servoing of Multicopter.pdf`
 中的比例导引速度角更新方法生成 PX4 NED velocity/acceleration setpoint。

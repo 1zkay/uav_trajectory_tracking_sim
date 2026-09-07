@@ -205,7 +205,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "enable_camera_bridge",
                 default_value="false",
-                description="Bridge the x500_0 Gazebo gimbal camera image to ROS 2.",
+                description="Bridge the x500_0 Gazebo fixed camera image to ROS 2.",
             ),
             DeclareLaunchArgument(
                 "camera_image_bridge_qos",
@@ -218,7 +218,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "camera_gazebo_topic",
                 default_value="/world/trajectory_tracking/model/x500_0/link/camera_link/sensor/camera/image",
-                description="Gazebo image topic produced by the x500_0 gimbal camera.",
+                description="Gazebo image topic produced by the x500_0 fixed camera.",
             ),
             DeclareLaunchArgument(
                 "camera_image_topic",
@@ -228,12 +228,12 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "camera_info_gazebo_topic",
                 default_value="/world/trajectory_tracking/model/x500_0/link/camera_link/sensor/camera/camera_info",
-                description="Gazebo CameraInfo topic produced by the x500_0 gimbal camera.",
+                description="Gazebo CameraInfo topic produced by the x500_0 fixed camera.",
             ),
             DeclareLaunchArgument(
                 "camera_info_topic",
                 default_value="/x500_0/camera/camera_info",
-                description="ROS 2 CameraInfo topic for the x500_0 gimbal camera.",
+                description="ROS 2 CameraInfo topic for the x500_0 fixed camera.",
             ),
             DeclareLaunchArgument(
                 "enable_yolo_tracking",
@@ -420,7 +420,7 @@ def generate_launch_description():
                 arguments=[
                     [
                         camera_info_gazebo_topic,
-                        "@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo",
+                        "@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
                     ]
                 ],
                 remappings=[(camera_info_gazebo_topic, camera_info_topic)],

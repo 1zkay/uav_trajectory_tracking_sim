@@ -130,7 +130,7 @@
     </model>
     <include>
       <name>x500_0</name>
-      <uri>model://x500_gimbal_trajectory_wind</uri>
+      <uri>model://x500_mono_cam_trajectory_wind</uri>
       <pose>0 0 0 0 0 0</pose>
     </include>
     <include>

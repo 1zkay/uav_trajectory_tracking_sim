@@ -9,8 +9,6 @@ PX4_GZ_WORLD="${PX4_GZ_WORLD:-trajectory_tracking}"
 TRAJECTORY_FILE="${TRAJECTORY_FILE:-${SIM_ROOT}/src/uav_trajectory_tracking/config/trajectory_hold.yaml}"
 WIND_FILE="${WIND_FILE:-${SIM_ROOT}/src/uav_trajectory_tracking/config/wind.yaml}"
 SHOW_TRAJECTORY_VISUALS="${SHOW_TRAJECTORY_VISUALS:-false}"
-HOST_AIRFRAME_OVERLAY="${SIM_ROOT}/px4_overlays/airframes/4019_gz_x500_gimbal"
-HOST_AIRFRAME_NAME="4019_gz_x500_gimbal"
 
 if [[ "${PX4_GZ_WORLD}" == "trajectory_tracking" ]]; then
   GENERATED_WORLD="${SIM_ROOT}/build/generated/worlds/trajectory_tracking.sdf"
@@ -38,18 +36,6 @@ if [[ "${PX4_GZ_WORLD}" == "trajectory_tracking" ]]; then
   export PX4_GZ_MODEL_NAME="${PX4_GZ_MODEL_NAME:-x500_0}"
 fi
 
-if [[ -f "${HOST_AIRFRAME_OVERLAY}" ]]; then
-  echo "Syncing PX4 host gimbal airframe from ${HOST_AIRFRAME_OVERLAY}"
-  install -D -m 0644 \
-    "${HOST_AIRFRAME_OVERLAY}" \
-    "${PX4_ROOT}/ROMFS/px4fmu_common/init.d-posix/airframes/${HOST_AIRFRAME_NAME}"
-  if [[ -d "${PX4_ROOT}/build/px4_sitl_default/etc/init.d-posix/airframes" ]]; then
-    install -D -m 0644 \
-      "${HOST_AIRFRAME_OVERLAY}" \
-      "${PX4_ROOT}/build/px4_sitl_default/etc/init.d-posix/airframes/${HOST_AIRFRAME_NAME}"
-  fi
-fi
-
 cd "${PX4_ROOT}"
 if [[ -f "${PYTHON_VENV}/bin/activate" ]]; then
   source "${PYTHON_VENV}/bin/activate"
@@ -57,4 +43,4 @@ fi
 
 export PX4_GZ_WORLD
 
-exec make px4_sitl gz_x500_gimbal
+exec make px4_sitl gz_x500_mono_cam

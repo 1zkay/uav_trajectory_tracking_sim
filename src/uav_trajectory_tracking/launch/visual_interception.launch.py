@@ -44,24 +44,6 @@ def generate_launch_description():
         "yolo_annotation_max_publish_hz"
     )
 
-    enable_gimbal_tracking = LaunchConfiguration("enable_gimbal_tracking")
-    gimbal_config_file = LaunchConfiguration("gimbal_config_file")
-    gimbal_input_topic = LaunchConfiguration("gimbal_input_topic")
-    gimbal_joint_state_gazebo_topic = LaunchConfiguration(
-        "gimbal_joint_state_gazebo_topic"
-    )
-    gimbal_joint_state_topic = LaunchConfiguration("gimbal_joint_state_topic")
-    gimbal_set_attitude_topic = LaunchConfiguration("gimbal_set_attitude_topic")
-    gimbal_error_topic = LaunchConfiguration("gimbal_error_topic")
-    gimbal_tracking_active_topic = LaunchConfiguration("gimbal_tracking_active_topic")
-    gimbal_lock_active_topic = LaunchConfiguration("gimbal_lock_active_topic")
-    gimbal_search_active_topic = LaunchConfiguration("gimbal_search_active_topic")
-    enable_gimbal_performance_monitor = LaunchConfiguration(
-        "enable_gimbal_performance_monitor"
-    )
-    gimbal_performance_metrics_topic = LaunchConfiguration(
-        "gimbal_performance_metrics_topic"
-    )
 
     visual_interception_config_file = LaunchConfiguration(
         "visual_interception_config_file"
@@ -74,6 +56,11 @@ def generate_launch_description():
     run_id = LaunchConfiguration("run_id")
     publish_state_compare_topics = LaunchConfiguration("publish_state_compare_topics")
     state_compare_topic_prefix = LaunchConfiguration("state_compare_topic_prefix")
+
+    fixed_camera_config_file = LaunchConfiguration("fixed_camera_config_file")
+    visual_error_topic = LaunchConfiguration("visual_error_topic")
+    tracking_active_topic = LaunchConfiguration("tracking_active_topic")
+    lock_active_topic = LaunchConfiguration("lock_active_topic")
 
     return LaunchDescription(
         [
@@ -155,7 +142,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "enable_camera_bridge",
                 default_value="true",
-                description="Bridge the host gimbal camera image and CameraInfo to ROS 2.",
+                description="Bridge the host fixed camera image and CameraInfo to ROS 2.",
             ),
             DeclareLaunchArgument(
                 "camera_image_bridge_qos",
@@ -165,7 +152,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "camera_gazebo_topic",
                 default_value="/world/trajectory_tracking/model/x500_0/link/camera_link/sensor/camera/image",
-                description="Gazebo image topic produced by the host gimbal camera.",
+                description="Gazebo image topic produced by the host fixed camera.",
             ),
             DeclareLaunchArgument(
                 "camera_image_topic",
@@ -175,7 +162,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "camera_info_gazebo_topic",
                 default_value="/world/trajectory_tracking/model/x500_0/link/camera_link/sensor/camera/camera_info",
-                description="Gazebo CameraInfo topic produced by the host gimbal camera.",
+                description="Gazebo CameraInfo topic produced by the host fixed camera.",
             ),
             DeclareLaunchArgument(
                 "camera_info_topic",
@@ -224,71 +211,15 @@ def generate_launch_description():
                 description="Maximum publish rate for the optional annotated image topic.",
             ),
             DeclareLaunchArgument(
-                "enable_gimbal_tracking",
-                default_value="true",
-                description="Start visual-servo gimbal tracking.",
+                "fixed_camera_config_file",
+                default_value=PathJoinSubstitution([
+                    FindPackageShare("uav_trajectory_tracking"), "config", "fixed_camera_tracking.yaml"
+                ]),
+                description="Calibrated fixed-camera target observation parameters.",
             ),
-            DeclareLaunchArgument(
-                "gimbal_config_file",
-                default_value=PathJoinSubstitution(
-                    [
-                        FindPackageShare("uav_trajectory_tracking"),
-                        "config",
-                        "gimbal_tracking.yaml",
-                    ]
-                ),
-                description="YAML parameter file for gimbal_target_tracker.",
-            ),
-            DeclareLaunchArgument(
-                "gimbal_input_topic",
-                default_value="/x500_0/yolo/tracks",
-                description="Detection2DArray topic consumed by gimbal_target_tracker.",
-            ),
-            DeclareLaunchArgument(
-                "gimbal_joint_state_gazebo_topic",
-                default_value="/world/trajectory_tracking/model/x500_0/joint_state",
-                description="Gazebo joint state topic containing host gimbal joints.",
-            ),
-            DeclareLaunchArgument(
-                "gimbal_joint_state_topic",
-                default_value="/x500_0/gimbal/joint_states",
-                description="ROS 2 JointState topic consumed by interception and gimbal nodes.",
-            ),
-            DeclareLaunchArgument(
-                "gimbal_set_attitude_topic",
-                default_value="/fmu/in/gimbal_manager_set_attitude",
-                description="PX4 gimbal manager attitude setpoint input topic.",
-            ),
-            DeclareLaunchArgument(
-                "gimbal_error_topic",
-                default_value="/x500_0/gimbal_target_tracker/error",
-                description="Gimbal target tracker image angular error topic.",
-            ),
-            DeclareLaunchArgument(
-                "gimbal_tracking_active_topic",
-                default_value="/x500_0/gimbal_target_tracker/tracking_active",
-                description="Gimbal target tracker active-state topic.",
-            ),
-            DeclareLaunchArgument(
-                "gimbal_lock_active_topic",
-                default_value="/x500_0/gimbal_target_tracker/lock_active",
-                description="Gimbal target tracker seeker-lock topic.",
-            ),
-            DeclareLaunchArgument(
-                "gimbal_search_active_topic",
-                default_value="/x500_0/gimbal_target_tracker/search_active",
-                description="Gimbal target tracker search-active control topic.",
-            ),
-            DeclareLaunchArgument(
-                "enable_gimbal_performance_monitor",
-                default_value="true",
-                description="Start gimbal visual-servo performance monitor.",
-            ),
-            DeclareLaunchArgument(
-                "gimbal_performance_metrics_topic",
-                default_value="/x500_0/gimbal_performance/metrics",
-                description="DiagnosticArray topic with gimbal performance metrics.",
-            ),
+            DeclareLaunchArgument("visual_error_topic", default_value="/x500_0/fixed_camera_target_tracker/error"),
+            DeclareLaunchArgument("tracking_active_topic", default_value="/x500_0/fixed_camera_target_tracker/tracking_active"),
+            DeclareLaunchArgument("lock_active_topic", default_value="/x500_0/fixed_camera_target_tracker/lock_active"),
             DeclareLaunchArgument(
                 "visual_interception_config_file",
                 default_value=PathJoinSubstitution(
@@ -394,7 +325,7 @@ def generate_launch_description():
                 arguments=[
                     [
                         camera_info_gazebo_topic,
-                        "@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo",
+                        "@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
                     ]
                 ],
                 remappings=[(camera_info_gazebo_topic, camera_info_topic)],
@@ -435,48 +366,18 @@ def generate_launch_description():
                 ],
             ),
             Node(
-                package="ros_gz_bridge",
-                executable="parameter_bridge",
-                name="x500_0_gimbal_joint_state_bridge",
-                namespace=node_namespace,
-                output="screen",
-                condition=IfCondition(enable_gimbal_tracking),
-                arguments=[
-                    [
-                        gimbal_joint_state_gazebo_topic,
-                        "@sensor_msgs/msg/JointState[gz.msgs.Model",
-                    ]
-                ],
-                remappings=[
-                    (gimbal_joint_state_gazebo_topic, gimbal_joint_state_topic)
-                ],
-            ),
-            Node(
                 package="uav_trajectory_tracking",
-                executable="gimbal_target_tracker",
-                name="gimbal_target_tracker",
+                executable="fixed_camera_target_tracker",
+                name="fixed_camera_target_tracker",
                 namespace=node_namespace,
                 output="screen",
-                condition=IfCondition(enable_gimbal_tracking),
-                parameters=[
-                    gimbal_config_file,
-                    {
-                        "detections_topic": gimbal_input_topic,
-                        "camera_info_topic": camera_info_topic,
-                        "gimbal_joint_state_topic": gimbal_joint_state_topic,
-                        "gimbal_set_attitude_topic": gimbal_set_attitude_topic,
-                        "error_topic": gimbal_error_topic,
-                        "tracking_active_topic": gimbal_tracking_active_topic,
-                        "lock_active_topic": gimbal_lock_active_topic,
-                        "search_active_topic": gimbal_search_active_topic,
-                        "vehicle_command_topic": vehicle_command_topic,
-                        "vehicle_command_ack_topic": vehicle_command_ack_topic,
-                        "target_system": ParameterValue(target_system, value_type=int),
-                        "target_component": ParameterValue(target_component, value_type=int),
-                        "source_system": ParameterValue(source_system, value_type=int),
-                        "source_component": ParameterValue(source_component, value_type=int),
-                    },
-                ],
+                parameters=[fixed_camera_config_file, {
+                    "detections_topic": yolo_tracks_topic,
+                    "camera_info_topic": camera_info_topic,
+                    "error_topic": visual_error_topic,
+                    "tracking_active_topic": tracking_active_topic,
+                    "lock_active_topic": lock_active_topic,
+                }],
             ),
             Node(
                 package="uav_trajectory_tracking",
@@ -490,11 +391,9 @@ def generate_launch_description():
                         "vehicle_status_topic": vehicle_status_topic,
                         "vehicle_local_position_topic": vehicle_local_position_topic,
                         "vehicle_attitude_topic": vehicle_attitude_topic,
-                        "gimbal_joint_state_topic": gimbal_joint_state_topic,
-                        "gimbal_error_topic": gimbal_error_topic,
-                        "gimbal_search_active_topic": gimbal_search_active_topic,
-                        "tracking_active_topic": gimbal_tracking_active_topic,
-                        "lock_active_topic": gimbal_lock_active_topic,
+                        "visual_error_topic": visual_error_topic,
+                        "tracking_active_topic": tracking_active_topic,
+                        "lock_active_topic": lock_active_topic,
                         "offboard_control_mode_topic": offboard_control_mode_topic,
                         "trajectory_setpoint_topic": trajectory_setpoint_topic,
                         "vehicle_command_topic": vehicle_command_topic,
@@ -503,22 +402,6 @@ def generate_launch_description():
                         "target_component": ParameterValue(target_component, value_type=int),
                         "source_system": ParameterValue(source_system, value_type=int),
                         "source_component": ParameterValue(source_component, value_type=int),
-                    }
-                ],
-            ),
-            Node(
-                package="uav_trajectory_tracking",
-                executable="gimbal_performance_monitor",
-                name="gimbal_performance_monitor",
-                namespace=node_namespace,
-                output="screen",
-                condition=IfCondition(enable_gimbal_performance_monitor),
-                parameters=[
-                    {
-                        "detections_topic": gimbal_input_topic,
-                        "tracking_active_topic": gimbal_tracking_active_topic,
-                        "camera_info_topic": camera_info_topic,
-                        "metrics_topic": gimbal_performance_metrics_topic,
                     }
                 ],
             ),
