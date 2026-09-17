@@ -1,8 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<sdf version='1.9'>
+<sdf version='1.9' xmlns:experimental='http://sdformat.org/schemas/experimental'>
   <model name='x500_trajectory_wind'>
     <include merge='true'>
       <uri>model://x500</uri>
+      <experimental:params>
+        <visual element_id='base_link::base_link_visual'>
+          <material action='add'>
+            <ambient>0.02 0.08 0.8 1</ambient>
+            <diffuse>0.02 0.08 0.8 1</diffuse>
+          </material>
+        </visual>
+      </experimental:params>
     </include>
     <enable_wind>true</enable_wind>
     <plugin

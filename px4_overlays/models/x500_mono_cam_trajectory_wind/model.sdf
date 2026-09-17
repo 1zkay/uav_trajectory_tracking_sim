@@ -1,10 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <sdf version='1.9' xmlns:experimental='http://sdformat.org/schemas/experimental'>
   <model name='x500_mono_cam_trajectory_wind'>
-    <!-- Keep the upstream camera and fixed joint; override only image size. -->
+    <!-- Keep upstream dynamics and camera mounting; override appearance and image size. -->
     <include merge='true'>
       <uri>model://x500_mono_cam</uri>
       <experimental:params>
+        <visual element_id='base_link::base_link_visual'>
+          <material action='add'>
+            <ambient>0.8 0.02 0.02 1</ambient>
+            <diffuse>0.8 0.02 0.02 1</diffuse>
+          </material>
+        </visual>
         <sensor element_id='camera_link::camera' action='modify'>
           <camera>
             <image>

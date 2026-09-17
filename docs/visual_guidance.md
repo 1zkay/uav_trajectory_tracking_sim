@@ -19,7 +19,7 @@ ID 变化不重置锁定确认或中断 bearing；真正的观测超时仍会清
 视觉 launch 将该参数文件同时传给观测节点和制导节点；默认 0.2 s。
 `visual_interception.yaml` 中的 `tracking_status_timeout_s` 统一控制两个 Bool 状态话题的接收超时，
 默认仍为 0.2 s，各话题独立记录接收时间。它替代原来的 `tracking_active_timeout_s` / `lock_active_timeout_s`。
-LOS 预测上限仍为 0.12 s；本次配置去重不改变有效观测期限的取最小值规则。
+LOS 预测上限为 0.12 s；有效观测期限取共享观测期限（默认 0.2 s）与 LOS 预测上限的较小值，默认为 0.12 s。
 单独运行制导节点时，共享期限通过 ROS 参数文件或 `-p observation_timeout_s:=...` 传入，
 不再从制导业务 YAML 读取。
 
