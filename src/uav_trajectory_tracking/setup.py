@@ -13,7 +13,6 @@ setup(
         (f"share/{package_name}/config", glob("config/*.yaml")),
         (f"share/{package_name}/config/wind_profiles", glob("config/wind_profiles/*.yaml")),
         (f"share/{package_name}/launch", glob("launch/*.py")),
-        (f"share/{package_name}/rviz", glob("rviz/*.rviz")),
     ],
     install_requires=["setuptools", "PyYAML"],
     zip_safe=True,

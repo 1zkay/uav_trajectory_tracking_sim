@@ -271,6 +271,20 @@ def generate_launch_description():
             ),
             SetParameter(name="use_sim_time", value=True),
             Node(
+                package="uav_trajectory_tracking",
+                executable="trajectory_visualizer",
+                name="trajectory_visualizer",
+                namespace=node_namespace,
+                output="screen",
+                parameters=[
+                    {
+                        "vehicle_local_position_topic": vehicle_local_position_topic,
+                        "reference_config_file": logger_config_file,
+                        "publish_planned_path": False,
+                    }
+                ],
+            ),
+            Node(
                 package="ros_gz_bridge",
                 executable="parameter_bridge",
                 name="x500_0_truth_odometry_bridge",

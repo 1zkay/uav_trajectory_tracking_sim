@@ -39,9 +39,9 @@ ros2 topic echo /px4_1/fmu/out/vehicle_status_v4 --qos-reliability best_effort -
 ros2 topic echo /target/trajectory_tracker/current_stage --once
 ```
 
-RViz 使用 `map` 作为固定坐标系。`trajectory_visualizer` 会把 PX4 本地 NED 轨迹转换成 ROS ENU，
-所以 RViz 中高度向上。Gazebo 世界坐标也是 ENU，临时启用的 3D 轨迹标记使用
-`Gazebo x=east=NED y`、`Gazebo y=north=NED x`、`Gazebo z=up=-NED z`。
+Foxglove 3D 面板使用 `map` 作为固定坐标系和显示坐标系。`trajectory_visualizer` 根据各机
+`ref_lat/ref_lon/ref_alt` 将 PX4 本地 NED 转为共同世界 ENU，原点来自 `trajectory_logging.yaml`。
+因此显示坐标为 `x=east, y=north, z=up`，并保留两机起飞原点之间的实际偏移。
 
 `x500_0` 是带前向固定相机的主机，底层使用官方 `x500_mono_cam`。
 PX4 0 由 `scripts/start_px4_gazebo.sh` 以 `gz_x500_mono_cam` / 4010 启动；
@@ -114,7 +114,7 @@ Offboard 模式要求先持续发送 setpoint。该节点默认先发送 1.5 秒
 3. 无人机不按预期方向飞
 
 轨迹使用 PX4 本地 NED，不是 ROS ENU。`z=-5` 表示离起飞点高度 5 m。
-RViz 显示时已经转换为 ENU；不要把 RViz 里的 `z=5` 反写回 YAML。
+Foxglove 显示使用公共世界 ENU `map`；不要把显示的高度值直接写回本地 NED YAML。
 Gazebo 的 3D 标记由脚本自动完成 NED 到 Gazebo 坐标的转换，不需要手工同步 SDF。
 如果 Gazebo 里的轨迹标记相对实际飞行轨迹旋转 90 度，优先检查生成脚本是否使用了
 `x=east=NED y, y=north=NED x` 的转换。
@@ -144,17 +144,23 @@ ros2 topic echo /fmu/out/estimator_status_flags --once
 正常状态下 NavSat 应输出有效经纬高，`xy_valid/z_valid` 应为 `true`，
 `cs_yaw_align/cs_gnss_pos` 应为 `true`，`cs_mag_field_disturbed` 应为 `false`。
 
-6. RViz 看不到轨迹
+6. Foxglove 3D 面板看不到轨迹
 
-确认 `start_trajectory_tracking.sh` 已经启动，或者单独运行：
+主机视觉拦截使用 `start_visual_interception.sh`，目标机使用 `start_target_trajectory_tracking.sh`；
+这两个入口都会启动轨迹发布节点。确认公共仿真时钟和 Foxglove Bridge 已运行，再检查发布者：
 
 ```bash
-ros2 run uav_trajectory_tracking trajectory_visualizer
+ros2 topic info /vehicle_path --verbose
+ros2 topic info /target/vehicle_path --verbose
+ros2 topic echo /vehicle_path --qos-reliability reliable --qos-durability transient_local --once
 ```
 
-RViz 的 Fixed Frame 需要是 `map`，并添加 `MarkerArray` 订阅 `/trajectory_markers`、
-`Path` 订阅 `/trajectory_path` 和 `/vehicle_path`。仓库提供的 `scripts/start_rviz.sh`
-已经预配置这些显示项。
+在 Foxglove 连接 `ws://localhost:8765`，3D 面板的固定/显示坐标系均选择 `map`，
+启用 `/vehicle_path` 和 `/target/vehicle_path`；目标规划路径可启用 `/target/trajectory_path`。
+当前位置及规划起终点可启用 `/trajectory_markers` 和 `/target/trajectory_markers`，标记话题不重复发布规划线。
+视觉拦截模式不发布主机 `/trajectory_path`。若 `poses` 一直为空，检查公共 `/clock`、
+`use_sim_time=true`、PX4 位置有效标志和全局参考原点；位置样本的 `timestamp_sample` 不应超前 `/clock` 超过 20 ms。
+不要另外启动主机轨迹控制器来补可视化。
 
 ## 日志对齐状态
 

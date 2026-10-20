@@ -136,3 +136,35 @@ def geodetic_to_px4_ned(point, reference):
     north = k*(math.cos(lat0)*math.sin(lat)-math.sin(lat0)*math.cos(lat)*math.cos(lon-lon0))*6371000.0
     east = k*math.cos(lat)*math.sin(lon-lon0)*6371000.0
     return north, east, reference[2]-point[2]
+
+
+def px4_ned_to_world(point, reference, origin):
+    """PX4 MapProjection NED -> shared Gazebo WGS84 ENU tangent plane.
+
+    Inverse of geodetic_to_px4_ned followed by the inverse world_to_geodetic
+    transform. The altitude convention is the same SITL convention as above.
+    """
+    lat0, lon0 = map(math.radians, reference[:2])
+    north, east = point[0]/6371000.0, point[1]/6371000.0
+    c = math.hypot(north, east)
+    lat, lon = lat0, lon0
+    if c > 0:
+        lat = math.asin(max(-1.0, min(1.0,
+            math.cos(c)*math.sin(lat0) + north*math.sin(c)*math.cos(lat0)/c)))
+        lon += math.atan2(east*math.sin(c),
+                          c*math.cos(lat0)*math.cos(c)-north*math.sin(lat0)*math.sin(c))
+
+    def ecef(latitude, longitude, altitude):
+        e2 = 6.6943799901413165e-3
+        n = 6378137.0 / math.sqrt(1-e2*math.sin(latitude)**2)
+        return ((n+altitude)*math.cos(latitude)*math.cos(longitude),
+                (n+altitude)*math.cos(latitude)*math.sin(longitude),
+                (n*(1-e2)+altitude)*math.sin(latitude))
+
+    map_lat, map_lon = map(math.radians, origin[:2])
+    delta = tuple(a-b for a,b in zip(ecef(lat, lon, reference[2]-point[2]),
+                                    ecef(map_lat, map_lon, origin[2])))
+    x, y, z = delta
+    return (-math.sin(map_lon)*x + math.cos(map_lon)*y,
+            -math.sin(map_lat)*math.cos(map_lon)*x - math.sin(map_lat)*math.sin(map_lon)*y + math.cos(map_lat)*z,
+            math.cos(map_lat)*math.cos(map_lon)*x + math.cos(map_lat)*math.sin(map_lon)*y + math.sin(map_lat)*z)

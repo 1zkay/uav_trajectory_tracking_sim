@@ -34,7 +34,7 @@ def generate_launch_description():
     run_id = LaunchConfiguration("run_id")
     publish_state_compare_topics = LaunchConfiguration("publish_state_compare_topics")
     state_compare_topic_prefix = LaunchConfiguration("state_compare_topic_prefix")
-    rviz_frame_id = LaunchConfiguration("rviz_frame_id")
+    visualization_frame_id = LaunchConfiguration("visualization_frame_id")
 
     enable_camera_bridge = LaunchConfiguration("enable_camera_bridge")
     camera_gazebo_topic = LaunchConfiguration("camera_gazebo_topic")
@@ -145,17 +145,17 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "trajectory_markers_topic",
                 default_value="/trajectory_markers",
-                description="RViz trajectory marker topic.",
+                description="Vehicle position and trajectory endpoint marker topic.",
             ),
             DeclareLaunchArgument(
                 "trajectory_path_topic",
                 default_value="/trajectory_path",
-                description="RViz planned trajectory path topic.",
+                description="Planned trajectory Path topic.",
             ),
             DeclareLaunchArgument(
                 "vehicle_path_topic",
                 default_value="/vehicle_path",
-                description="RViz accumulated vehicle path topic.",
+                description="Accumulated vehicle Path topic.",
             ),
             DeclareLaunchArgument(
                 "enable_csv_logging",
@@ -189,9 +189,9 @@ def generate_launch_description():
                 description="Topic prefix for online state comparison Vector3Stamped topics.",
             ),
             DeclareLaunchArgument(
-                "rviz_frame_id",
+                "visualization_frame_id",
                 default_value="map",
-                description="RViz frame used by trajectory_visualizer. PX4 NED is converted to ROS ENU.",
+                description="Shared ENU frame used by trajectory_visualizer.",
             ),
             DeclareLaunchArgument(
                 "enable_camera_bridge",
@@ -292,11 +292,11 @@ def generate_launch_description():
                     {
                         "trajectory_file": trajectory_file,
                         "vehicle_local_position_topic": vehicle_local_position_topic,
-                        "trajectory_stage_topic": trajectory_stage_topic,
+                        "reference_config_file": logger_config_file,
                         "trajectory_markers_topic": trajectory_markers_topic,
                         "trajectory_path_topic": trajectory_path_topic,
                         "vehicle_path_topic": vehicle_path_topic,
-                        "frame_id": rviz_frame_id,
+                        "frame_id": visualization_frame_id,
                     }
                 ],
             ),

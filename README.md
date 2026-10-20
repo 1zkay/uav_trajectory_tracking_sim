@@ -62,7 +62,7 @@ cd /home/zk/uav_trajectory_tracking_sim
 如果设置了 `PX4_GZ_WORLD`，此终端与 PX4/Gazebo 终端必须使用相同值。
 单独运行目标轨迹时也需要此服务，无需启动主机视觉链路。
 
-如果只做主机轨迹跟踪，终端 4 启动主机轨迹跟踪、相机桥接、YOLO + BoT-SORT 跟踪、日志记录和 RViz 可视化发布节点：
+如果只做主机轨迹跟踪，终端 4 启动主机轨迹跟踪、相机桥接、YOLO + BoT-SORT 跟踪、日志记录和标准 ROS 轨迹发布节点：
 
 ```bash
 cd /home/zk/uav_trajectory_tracking_sim
@@ -85,27 +85,20 @@ cd /home/zk/uav_trajectory_tracking_sim
 ./scripts/start_target_trajectory_tracking.sh
 ```
 
-终端 6，启动主机视觉拦截链路。该入口会启动相机桥接、YOLO + BoT-SORT、固定相机目标观测、主机 Gazebo truth 日志桥接和 `visual_pursuit_interceptor`：
+终端 6，启动主机视觉拦截链路。该入口会启动相机桥接、YOLO + BoT-SORT、固定相机目标观测、主机 Gazebo truth 日志桥接、实际轨迹发布节点和 `visual_pursuit_interceptor`：
 
 ```bash
 cd /home/zk/uav_trajectory_tracking_sim
 ./scripts/start_visual_interception.sh
 ```
 
-终端 7 可选，用于查看轨迹、目标点、规划路径和实际飞行尾迹：
-
-```bash
-cd /home/zk/uav_trajectory_tracking_sim
-./scripts/start_rviz.sh
-```
-
-终端 8 可选，用于通过 Foxglove 查看 ROS 2 话题、曲线、图像和运动状态：
+终端 7，启动 Foxglove Bridge，用于查看双机三维轨迹、ROS 2 话题、曲线和图像：
 
 ```bash
 cd /home/zk/uav_trajectory_tracking_sim
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-ros2 launch foxglove_bridge foxglove_bridge_launch.xml address:=127.0.0.1 port:=8765
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml address:=127.0.0.1 port:=8765 use_sim_time:=true
 ```
 
 打开 Foxglove 后选择 `Foxglove WebSocket`，连接地址为：
@@ -114,9 +107,39 @@ ros2 launch foxglove_bridge foxglove_bridge_launch.xml address:=127.0.0.1 port:=
 ws://localhost:8765
 ```
 
+添加 **3D** 面板，将固定坐标系和显示坐标系设为 `map`，启用以下话题，将轨迹设为线条并为两机设置不同颜色：
+
+| 话题 | 标准 ROS 2 类型 | 内容 |
+| --- | --- | --- |
+| `/vehicle_path` | `nav_msgs/msg/Path` | 无人机 0 的实际轨迹（PX4 位置估计） |
+| `/target/vehicle_path` | `nav_msgs/msg/Path` | 目标机的实际轨迹（PX4 位置估计） |
+| `/target/trajectory_path` | `nav_msgs/msg/Path` | 目标机的规划轨迹 |
+| `/trajectory_markers` | `visualization_msgs/msg/MarkerArray` | 无人机 0 的当前位置标记 |
+| `/target/trajectory_markers` | `visualization_msgs/msg/MarkerArray` | 目标机的当前位置及规划轨迹起终点标记 |
+
+轨迹线由 `Path` 话题发布；`MarkerArray` 只发布当前位置和规划起终点标记，全部启用时也不会重复绘制规划线。
+
+视觉拦截没有预先给定的主机规划路径，因此不发布 `/trajectory_path`，也不读取 `trajectory_hold.yaml`。
+普通主机轨迹跟踪模式仍会发布 `/trajectory_path` 和规划起终点标记。
+可视化节点只订阅状态，不发送飞行控制指令；关闭 CSV 日志也不影响轨迹发布。
+
+两机使用同一个世界 ENU `map`，原点取自 `config/trajectory_logging.yaml` 的
+`world_origin_lat_lon_alt`（两套 launch 均可通过 `logger_config_file` 指定）。
+节点结合各机 `VehicleLocalPosition.ref_lat/ref_lon/ref_alt` 转换坐标；等待有效的
+`xy_valid/z_valid`、`xy_global/z_global` 和参考原点后才生成轨迹，不把各机本地原点当成同一点。
+实际轨迹点保留 `timestamp_sample` 的仿真采样时间，依赖本项目的公共 `/clock` 和
+`UXRCE_DDS_SYNCT=0` 设置。默认按最小 0.15 m 位移抽样，最多保留 2000 点，以 5 Hz 发布；
+本地位置估计重置、参考原点变化或仿真时钟回退时清空尾迹，避免跨运行或跨重置连线。
+时钟尚未初始化时不接收位置样本；超前当前仿真时间超过 20 ms 的样本会被丢弃，
+防止回退后迟到的上一轮数据阻塞新轨迹，容限与项目其他仿真节点保持一致。
+输入采用 BEST_EFFORT/VOLATILE，输出采用 RELIABLE/TRANSIENT_LOCAL、深度 1，保留最新完整快照。
+坐标及消息遵循 [REP-103](https://www.ros.org/reps/rep-0103.html)、
+[REP-105](https://www.ros.org/reps/rep-0105.html) 和标准 `nav_msgs/Path`；
+Foxglove 的 [3D 面板](https://docs.foxglove.dev/docs/visualization/panels/3d) 原生支持这些消息。
+
 当前 PX4 main 在这台机器上发布的是 `/fmu/out/vehicle_status_v4` 和
 `/fmu/out/vehicle_local_position_v1`，启动文件默认已经使用这两个话题。
-`start_trajectory_tracking.sh` 会同时启动控制节点、RViz 可视化发布节点、相机桥接和 YOLO + BoT-SORT 跟踪节点。
+`start_trajectory_tracking.sh` 会同时启动控制节点、标准 ROS 轨迹发布节点、相机桥接和 YOLO + BoT-SORT 跟踪节点。
 
 相机链路由共享的 `camera.launch.py` 启动官方桥接和静态 TF 发布器，直接输出
 `/x500_0/camera/image_raw` 与 `/x500_0/camera/camera_info`，使用光学 frame 并保留采集时间。
@@ -144,7 +167,7 @@ ws://localhost:8765
 只改主机默认轨迹时修改 `trajectory_hold.yaml` 或用 `TRAJECTORY_FILE=...` 覆盖；只改目标机轨迹时修改 `target_trajectory_hold.yaml` 或用 `TRAJECTORY_FILE=...` 覆盖。
 `scripts/start_px4_gazebo.sh` 会在启动前自动根据主机 YAML
 生成 Gazebo world，并同步到 PX4 的 worlds 目录；`scripts/start_trajectory_tracking.sh`
-也会默认把同一个主机 YAML 传给控制节点和 RViz 可视化节点。目标机启动脚本默认使用
+也会默认把同一个主机 YAML 传给控制节点和轨迹可视化节点。目标机启动脚本默认使用
 `target_trajectory_hold.yaml`，用于定点目标调试。若需要持续横向运动目标，可把
 `TRAJECTORY_FILE` 指向 `src/uav_trajectory_tracking/config/target_trajectory_linear.yaml`。
 轨迹控制采用 `entry -> trajectory -> return -> finished` 阶段：无人机先飞到曲线起点，
@@ -167,8 +190,8 @@ Gazebo 如果暂停，点击左下角播放按钮。轨迹仿真默认使用
 `x500_trajectory_wind`。两个机体都由 world 预加载，PX4 启动后分别通过
 `PX4_GZ_MODEL_NAME=x500_0` 和 `PX4_GZ_MODEL_NAME=x500_1` 连接，因此可以只在本仓库内启用
 受风模型和真值 odometry，不修改 PX4 原始 `x500_base` / `x500_mono_cam`。固定相机在项目包装模型中覆盖图像尺寸为 1920×1080，其余沿用官方传感器设置。
-Gazebo 世界默认不插入轨迹线、边界、参照方块或风向箭头，以减少视觉识别干扰；RViz 使用 ROS ENU
-`map` 坐标显示轨迹，其中 PX4 NED 会自动转换为 `x=east, y=north, z=up`。如果需要临时查看 Gazebo 静态轨迹标记，可用 `SHOW_TRAJECTORY_VISUALS=true ./scripts/start_px4_gazebo.sh` 启动。
+Gazebo 世界默认不插入轨迹线、边界、参照方块或风向箭头，以减少视觉识别干扰；Foxglove 使用公共 ENU
+`map` 坐标显示轨迹，PX4 本地 NED 会按各机参考原点转换为世界坐标 `x=east, y=north, z=up`。如果需要临时查看 Gazebo 静态轨迹标记，可用 `SHOW_TRAJECTORY_VISUALS=true ./scripts/start_px4_gazebo.sh` 启动。
 Gazebo 世界坐标同样按 ENU 显示：`Gazebo x=east`、`Gazebo y=north`、`Gazebo z=up`。
 
 ## 固定相机与视觉观测
